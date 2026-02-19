@@ -6,7 +6,7 @@ from scipy.special import expit
 N_T    = 180
 N_NU   = 30
 N_VPI  = 80
-T      = 1.0 / 252        # 1 trading day in years  (paper §4.1)
+T      = 0.0012             # paper §4.1: T = 0.0012 year (i.e. 0.3 day)
 XI     = 0.2
 GAMMA  = 1e-3
 KAPPA_P, THETA_P = 2.0, 0.04
@@ -32,18 +32,18 @@ def aQ(nu): return KAPPA_Q * (THETA_Q - nu)
 
 
 # ── Hamiltonian H(p) via vectorised Newton ─────────────────────────────────────
-def hamiltonian(p, lam, nu, n_iter=15):
+def hamiltonian(p, lam, V_i, n_iter=15):
     """
     H^{i,j}(p) = sup_{delta} Lambda(delta)*(delta - p)
-    Lambda(delta) = lam / (1 + exp(alpha + beta/sqrt(nu) * delta))
-    FOC: u*(delta-p) = sqrt(nu)/beta  where u = expit(alpha + beta/sqrt(nu) * delta)
-    Newton:  delta <- delta - u*(delta-p) + sqrt(nu)/beta
+    Lambda(delta) = lam / (1 + exp(alpha + beta/V_i * delta))
+    where V_i is the vega of option i (paper §4.1).
+    FOC: u*(delta-p) = V_i/beta  where u = expit(alpha + beta/V_i * delta)
+    Newton:  delta <- delta - u*(delta-p) + V_i/beta
     Returns H value (same shape as p).
     """
-    sqrt_nu = np.sqrt(nu)
-    bV     = BETA / sqrt_nu        # beta / sqrt(nu)
-    VoB    = sqrt_nu / BETA        # sqrt(nu) / beta
-    delta  = p + 2.0 * VoB        # initial guess
+    bV     = BETA / V_i        # beta / V_i
+    VoB    = V_i / BETA        # V_i / beta
+    delta  = p + 2.0 * VoB    # initial guess
 
     for _ in range(n_iter):
         u      = expit(ALPHA + bV * delta)
@@ -138,7 +138,7 @@ def compute_H_terms(v, options):
                 )
 
             p   = (v - v_shifted) / z                 # (N_NU, N_VPI)
-            H   = hamiltonian(p, lam, NU0)            # fixed ν₀ — fill probability independent of grid ν
+            H   = hamiltonian(p, lam, V_i)            # intensity parametrised by option vega V_i (paper §4.1)
 
             rhs += z * H * in_domain[None, :]
 

@@ -79,21 +79,21 @@ def get_options():
 
 
 # ── H'(p) via finite difference ───────────────────────────────────────────────
-def hamiltonian_prime(p, lam, nu, eps=1e-6):
-    """Numerical derivative of H w.r.t. p (nu = instantaneous variance)."""
-    return (hamiltonian(p + eps, lam, nu) - hamiltonian(p - eps, lam, nu)) / (2 * eps)
+def hamiltonian_prime(p, lam, V_i, eps=1e-6):
+    """Numerical derivative of H w.r.t. p (parametrised by option vega V_i)."""
+    return (hamiltonian(p + eps, lam, V_i) - hamiltonian(p - eps, lam, V_i)) / (2 * eps)
 
 
 # ── Lambda inverse: given y find delta s.t. Lambda(delta) = y ────────────────
-def lambda_inverse(y, lam, nu):
+def lambda_inverse(y, lam, V_i):
     """
-    Lambda(delta) = lam / (1 + exp(alpha + beta/sqrt(nu) * delta))
-    Solve for delta: exp(alpha + beta/sqrt(nu) * delta) = lam/y - 1
-    => delta = sqrt(nu)/beta * (log(lam/y - 1) - alpha)
+    Lambda(delta) = lam / (1 + exp(alpha + beta/V_i * delta))
+    Solve for delta: exp(alpha + beta/V_i * delta) = lam/y - 1
+    => delta = V_i/beta * (log(lam/y - 1) - alpha)
     Direct closed-form inversion.
     Returns delta (same shape as y).
     """
-    bV    = BETA / np.sqrt(nu)
+    bV    = BETA / V_i
     ratio = np.clip(lam / np.clip(y, 1e-12, None) - 1.0, 1e-12, None)
     return (np.log(ratio) - ALPHA) / bV
 
@@ -134,13 +134,13 @@ def optimal_spread(v0, opt, psi, nu_idx=None):
     p = (v_row - v_shifted) / z
 
     # H'(p) = -Lambda(delta*(p))  by the envelope theorem
-    Hprime = hamiltonian_prime(p, lam, nu)
+    Hprime = hamiltonian_prime(p, lam, V_i)
 
     # optimal spread: delta* = Lambda^{-1}(-H'(p))
     arg   = -Hprime
     # clamp arg to (0, lam) so Lambda_inverse is defined
     arg   = np.clip(arg, 1e-12, lam - 1e-12)
-    delta = lambda_inverse(arg, lam, nu)
+    delta = lambda_inverse(arg, lam, V_i)
     delta = np.maximum(delta, DELTA_INF)
 
     # where indicator is 0, spread is effectively infinity (use DELTA_INF)

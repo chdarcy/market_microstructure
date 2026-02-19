@@ -65,9 +65,9 @@ def bid_spread_vs_time(v_all, opt, nu_idx):
 
         p = (v_row - v_shifted) / z
 
-        Hprime = hamiltonian_prime(p, lam, nu)
+        Hprime = hamiltonian_prime(p, lam, V_i)
         arg    = np.clip(-Hprime, 1e-12, lam - 1e-12)
-        delta  = lambda_inverse(arg, lam, nu)
+        delta  = lambda_inverse(arg, lam, V_i)
         delta  = np.maximum(delta, DELTA_INF)
         delta  = np.where(in_domain, delta, DELTA_INF)
 
