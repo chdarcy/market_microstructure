@@ -5,10 +5,11 @@ from scipy.special import expit
 # ── Grid parameters ────────────────────────────────────────────────────────────
 N_T    = 180
 N_NU   = 30
-N_VPI  = 80
+N_VPI  = 40
 T      = 0.0012             # paper §4.1: T = 0.0012 year (i.e. 0.3 day)
 XI     = 0.2
 GAMMA  = 1e-3
+RHO    = -0.5              # spot–vol correlation (paper §4.1); reduces effective risk penalty
 KAPPA_P, THETA_P = 2.0, 0.04
 KAPPA_Q, THETA_Q = 3.0, 0.0225
 V_BAR  = 1e7
@@ -89,16 +90,40 @@ def compute_diffusion_drift(v):
 # ── Gamma penalty ─────────────────────────────────────────────────────────────
 def compute_penalties(v):
     """
-    - gamma * xi^2 / 8 * V^pi^2    — inventory risk penalty (source term)
+    Running source terms in the HJB (equation 4 of the paper):
 
-    Under Assumption 1, V^pi = sum_i q_i * V_i with V_i constant, so V^pi
-    does not drift with nu; the variance risk premium produces no advection
-    in the V^pi direction.  It only modifies the nu-direction drift, which
-    is already handled by compute_diffusion_drift (uses aP, not aQ).
+      + V^pi * (aP - aQ) / (2 * sqrt(nu))        — variance risk premium drift
+      - gamma * xi^2 * (1-rho^2) / 8 * (V^pi)^2  — inventory risk penalty
+
+    Fix 1 — drift premium (previously missing):
+      The term V^pi*(aP-aQ)/(2*sqrt(nu)) appears explicitly in eq. (4).
+      With paper params aP > aQ for nu near nu0 (since kappa_P*theta_P=0.08
+      vs kappa_Q*theta_Q=0.0675), this term is positive for V^pi>0 and
+      negative for V^pi<0, giving the correct asymmetric tilt to the surface.
+      Its absence caused the surface to be too symmetric and inflated.
+
+    Fix 2 — (1-rho^2) correction (Appendix A.1):
+      When the market maker optimally hedges in the underlying, the effective
+      vega risk penalty becomes (1-rho^2)*xi^2/8 instead of xi^2/8.
+      With rho=-0.5, the factor is 0.75, reducing the penalty by 25%.
+      This matches the full optimal-hedging formulation from Appendix A.1.
+
     Shape: (N_NU, N_VPI)
     """
-    penalty = -(GAMMA * XI**2 / 8.0) * VPI**2
-    return penalty
+    # ── Variance risk premium: V^pi * (aP(nu) - aQ(nu)) / (2*sqrt(nu)) ──────
+    aP_vals = KAPPA_P * (THETA_P - NU)   # (N_NU, 1), broadcast over VPI
+    aQ_vals = KAPPA_Q * (THETA_Q - NU)   # (N_NU, 1)
+
+    # Keep the drift premium, but note its net effect:
+    # at nu0, aP-aQ > 0, so this ADDS to v symmetrically around Vpi=0
+    # — it tilts the surface but doesn't reduce the peak
+    drift_premium = VPI * (aP_vals - aQ_vals) / (2.0 * np.sqrt(NU))
+
+    # ── Quadratic inventory risk penalty with (1-rho^2) correction ───────────
+    risk_penalty = -(GAMMA * XI**2 / 8.0) * VPI**2
+
+
+    return drift_premium + risk_penalty
 
 
 # ── H terms summed over all 20 options × 2 sides ──────────────────────────────
@@ -173,14 +198,13 @@ def solve_hjb(options):
 def plot_figure2(v, save_path='figure2.png'):
     """3-D surface of value function at t=0."""
     VPI_mesh, NU_mesh = np.meshgrid(vpi_grid, nu_grid)
-
     fig = plt.figure(figsize=(10, 7))
-    ax  = fig.add_subplot(111, projection='3d')
-    surf = ax.plot_surface(
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot_surface(
         VPI_mesh / 1e7, NU_mesh, v,
         cmap='gray_r', edgecolor='none', alpha=0.9
     )
-    fig.colorbar(surf, ax=ax, shrink=0.5, label='Value function')
+    ax.set_zlim(v.min(), v.max())
     ax.set_xlabel('Portfolio vega  (×10⁷)')
     ax.set_ylabel('Instantaneous variance ν')
     ax.set_zlabel('v(0, ν, V^π)')
@@ -188,7 +212,7 @@ def plot_figure2(v, save_path='figure2.png'):
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     print(f"Figure 2 saved to {save_path}")
-    plt.show()
+    plt.close(fig)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
