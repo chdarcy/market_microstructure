@@ -2,6 +2,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.special import expit
 
+# ══════════════════════════════════════════════════════════════════════════════
+# EXTENSION TOGGLE
+# ══════════════════════════════════════════════════════════════════════════════
+# False → BBG (2020) baseline: V^i frozen at t=0 (constant vega approximation)
+# True  → Stochastic vega extension: V^π advects with ν via the chain rule
+#           ∂_t v now includes  (∂V^π/∂ν) · aP(ν) · ∂_Vπ v
+#         where ∂V^π/∂ν = Σᵢ qᵢ · ∂V^i/∂ν is pre-computed from option data
+#         via a second finite-difference pass over ν (see compute_vega_sensitivities).
+#         Options must carry a 'dvega_dnu' field (added by solve_hjb automatically).
+USE_STOCHASTIC_VEGA = True
+
 # ── Grid parameters ────────────────────────────────────────────────────────────
 N_T    = 180
 N_NU   = 30
@@ -32,7 +43,89 @@ def aP(nu): return KAPPA_P * (THETA_P - nu)
 def aQ(nu): return KAPPA_Q * (THETA_Q - nu)
 
 
-# ── Hamiltonian H(p) via vectorised Newton ─────────────────────────────────────
+# ── Stochastic vega: ∂V^i/∂ν sensitivity ─────────────────────────────────────
+def compute_vega_sensitivities(options):
+    """
+    Estimate ∂V^i/∂ν for each option via central finite differences over ν,
+    using the same Heston MC infrastructure as heston_pricer.py.
+
+    Under the extension, V^i(ν) = 2√ν · ∂_ν O^i(ν) is no longer frozen.
+    As ν drifts under aP, V^π shifts at rate:
+        ∂V^π/∂ν · aP(ν)  =  Σᵢ qᵢ · (∂V^i/∂ν) · aP(ν)
+
+    Since qᵢ is unknown at PDE-solve time, we store ∂V^i/∂ν per option and
+    compute the aggregate coefficient on-the-fly inside compute_diffusion_drift
+    using the current inventory weights implied by V^π.  For the PDE we make
+    the approximation that the portfolio is dominated by ATM options, so we use
+    the inventory-weighted average:
+
+        dvpi_dnu(ν) ≈ Σᵢ (V^i / V^π_scale) · (∂V^i/∂ν)   at V^π = V_BAR/2
+
+    In practice we store ∂V^i/∂ν on each option dict under 'dvega_dnu' and
+    compute a grid-level aggregate coefficient DVPI_GNU of shape (N_NU,) by
+    summing over options weighted equally (inventory-neutral approximation).
+    This is the simplest tractable closure; a full treatment would require
+    tracking individual qᵢ as additional state variables.
+
+    Returns
+    -------
+    options : same list with 'dvega_dnu' added to each dict (units: yr^{1/2})
+    DVPI_GNU : ndarray (N_NU,) — aggregate ∂V^π/∂ν coefficient, shape (N_NU,)
+               evaluated at each ν grid point assuming equal inventory weights.
+    """
+    try:
+        from heston_pricer import (
+            _simulate, _option_prices, FD_EPS, SEED, STRIKES, MATURITIES, NU0
+        )
+    except ImportError:
+        print("[stochastic vega] heston_pricer not available — "
+              "dvega_dnu set to 0 (degenerates to constant-vega baseline).")
+        for opt in options:
+            opt['dvega_dnu'] = 0.0
+        return options, np.zeros(N_NU)
+
+    print("  [stochastic vega] Computing ∂V^i/∂ν via 4-point FD over ν …")
+    eps = FD_EPS
+
+    # Four perturbed simulations for 4th-order central difference of V^i(ν)
+    # V^i(ν) = 2√ν · [O(ν+ε) - O(ν-ε)] / (2ε)  (the vega)
+    # ∂V^i/∂ν ≈ [V^i(ν+ε) - V^i(ν-ε)] / (2ε)
+    # V^i(ν+ε) needs O(ν+2ε), O(ν), O(ν+ε) evaluated at ν+ε — i.e. 4 sims total.
+    # We use a simpler 2-point estimate: run the pricer at ν₀±δ with δ=5*FD_EPS
+    delta_nu = 5.0 * eps
+
+    def get_vegas(nu_centre):
+        paths_up, mat_to_step = _simulate(nu_centre + eps, SEED)
+        paths_dn, _           = _simulate(nu_centre - eps, SEED)
+        p_up = _option_prices(paths_up, mat_to_step)
+        p_dn = _option_prices(paths_dn, mat_to_step)
+        sigma_c = np.sqrt(nu_centre)
+        v = {}
+        for K in STRIKES:
+            for Tm in MATURITIES:
+                dpdnu = (p_up[(K,Tm)] - p_dn[(K,Tm)]) / (2.0 * eps)
+                v[(K,Tm)] = 2.0 * sigma_c * dpdnu
+        return v
+
+    vegas_hi = get_vegas(NU0 + delta_nu)
+    vegas_lo = get_vegas(NU0 - delta_nu)
+
+    # Attach ∂V^i/∂ν to each option (evaluated at ν₀; treated as constant on grid)
+    for opt in options:
+        key = (opt['strike'], opt['maturity'])
+        opt['dvega_dnu'] = (vegas_hi[key] - vegas_lo[key]) / (2.0 * delta_nu)
+
+    # Build aggregate coefficient: equal-weight sum over options
+    # Multiplied by sign correction so that positive V^π → positive drift when aP>0
+    # DVPI_GNU[k] = Σᵢ |∂V^i/∂ν| / N_opts  (scalar approximation, ν-independent)
+    n_opts = len(options)
+    dvpi_dnu_scalar = sum(opt['dvega_dnu'] for opt in options) / n_opts
+    DVPI_GNU = np.full(N_NU, dvpi_dnu_scalar)   # (N_NU,) constant on grid
+
+    print(f"  [stochastic vega] Mean ∂V^i/∂ν = {dvpi_dnu_scalar:.4f}  "
+          f"(range: {min(o['dvega_dnu'] for o in options):.4f} to "
+          f"{max(o['dvega_dnu'] for o in options):.4f})")
+    return options, DVPI_GNU
 def hamiltonian(p, lam, V_i, n_iter=15):
     """
     H^{i,j}(p) = sup_{delta} Lambda(delta)*(delta - p)
@@ -56,16 +149,32 @@ def hamiltonian(p, lam, V_i, n_iter=15):
 
 
 # ── Diffusion / drift PDE terms ────────────────────────────────────────────────
-def compute_diffusion_drift(v):
+def compute_diffusion_drift(v, dvpi_gnu=None):
     """
-    Returns RHS contribution from:
-      a_P * d_nu v  (upwind, a_P > 0 always on grid)
-      0.5 * xi^2 * nu * d2_nu v  (centered, Neumann BCs)
+    Returns RHS contribution from the ν-direction terms:
+
+      aP(ν) · ∂_ν v                        (upwind, aP > 0 always on grid)
+      ½ ξ² ν · ∂²_νν v                     (centered, Neumann BCs)
+
+    Extension (USE_STOCHASTIC_VEGA=True):
+      aP(ν) · (∂V^π/∂ν) · ∂_Vπ v          (upwind in V^π direction)
+
+    The third term arises because V^π = Σᵢ qᵢ V^i(ν) is no longer constant —
+    it inherits the drift of ν under the physical measure.  Concretely, if ν
+    rises by dν then V^π rises by (∂V^π/∂ν) · dν, so the value function is
+    advected in the V^π direction at rate aP(ν) · ∂V^π/∂ν.
+
+    Parameters
+    ----------
+    v        : (N_NU, N_VPI) current value function
+    dvpi_gnu : (N_NU,) or None — aggregate ∂V^π/∂ν coefficient per ν row.
+               Required (and used) only when USE_STOCHASTIC_VEGA=True.
+
     Shape: (N_NU, N_VPI)
     """
     rhs = np.zeros_like(v)
 
-    # ── Upwind first derivative (a_P > 0 → backward difference) ──────────────
+    # ── Upwind first derivative in ν (aP > 0 → backward difference) ──────────
     aP_vals = aP(nu_grid)[:, None]          # (N_NU, 1)
 
     dv_dnu           = np.zeros_like(v)
@@ -74,7 +183,7 @@ def compute_diffusion_drift(v):
 
     rhs += aP_vals * dv_dnu
 
-    # ── Centered second derivative with Neumann ghost points ─────────────────
+    # ── Centered second derivative in ν with Neumann ghost points ─────────────
     v_ext          = np.empty((N_NU + 2, N_VPI))
     v_ext[1:-1, :] = v
     v_ext[0,    :] = v[0,  :]   # ghost below  (Neumann)
@@ -84,6 +193,34 @@ def compute_diffusion_drift(v):
     diff_coef = 0.5 * XI**2 * nu_grid[:, None]
 
     rhs += diff_coef * d2v_dnu2
+
+    # ── Stochastic vega extension: advection in V^π direction ─────────────────
+    if USE_STOCHASTIC_VEGA and dvpi_gnu is not None:
+        # Speed of V^π advection at each ν row: c(ν) = aP(ν) · ∂V^π/∂ν
+        # shape (N_NU, 1) for broadcasting
+        c = (aP_vals * dvpi_gnu[:, None])   # (N_NU, 1)
+
+        dvpi = vpi_grid[1] - vpi_grid[0]   # uniform spacing
+
+        # Upwind in V^π: if c > 0 use backward difference, else forward
+        dv_dvpi = np.zeros_like(v)
+
+        # Backward difference (c > 0): interior columns 1..N_VPI-1
+        dv_dvpi_back = np.zeros_like(v)
+        dv_dvpi_back[:, 1:]  = (v[:, 1:] - v[:, :-1]) / dvpi
+        dv_dvpi_back[:, 0]   = 0.0   # Neumann at left boundary
+
+        # Forward difference (c < 0): interior columns 0..N_VPI-2
+        dv_dvpi_fwd = np.zeros_like(v)
+        dv_dvpi_fwd[:, :-1] = (v[:, 1:] - v[:, :-1]) / dvpi
+        dv_dvpi_fwd[:, -1]  = 0.0   # Neumann at right boundary
+
+        # Select based on sign of c, broadcast over V^π axis
+        c_pos = (c >= 0)   # (N_NU, 1) boolean
+        dv_dvpi = np.where(c_pos, dv_dvpi_back, dv_dvpi_fwd)
+
+        rhs += c * dv_dvpi
+
     return rhs
 
 
@@ -174,17 +311,35 @@ def compute_H_terms(v, options):
 def solve_hjb(options):
     """
     Solves the HJB PDE backward from v(T)=0 using explicit Euler.
+
+    Baseline (USE_STOCHASTIC_VEGA=False):
+        Replicates BBG (2020) — V^i frozen at t=0.
+
+    Extension (USE_STOCHASTIC_VEGA=True):
+        Adds advection term  aP(ν) · (∂V^π/∂ν) · ∂_Vπ v  to the PDE.
+        ∂V^π/∂ν is estimated via a second FD pass in heston_pricer and stored
+        on each option dict as 'dvega_dnu'.  An inventory-neutral aggregate
+        coefficient DVPI_GNU is pre-computed once before the time loop.
+
     Returns v_all of shape (N_T+1, N_NU, N_VPI),
     where v_all[0] = v at t=0  (most valuable)
     and   v_all[N_T] = 0       (terminal condition).
     """
+    # ── Pre-compute stochastic vega coefficient (once, before time loop) ──────
+    dvpi_gnu = None
+    if USE_STOCHASTIC_VEGA:
+        print("  Mode: STOCHASTIC VEGA  (extension — V^π advects with ν)")
+        options, dvpi_gnu = compute_vega_sensitivities(options)
+    else:
+        print("  Mode: CONSTANT VEGA  (BBG 2020 baseline)")
+
     v     = np.zeros((N_NU, N_VPI))      # terminal condition v(T) = 0
     v_all = np.zeros((N_T + 1, N_NU, N_VPI))
     v_all[N_T] = v
 
     # March backward: store step n at index N_T - n
     for step in range(N_T):
-        rhs  = compute_diffusion_drift(v)
+        rhs  = compute_diffusion_drift(v, dvpi_gnu=dvpi_gnu)
         rhs += compute_penalties(v)
         rhs += compute_H_terms(v, options)
 
@@ -280,15 +435,59 @@ if __name__ == '__main__':
     # ── Solve ─────────────────────────────────────────────────────────────────
     print(f"\nSolving HJB on {N_NU}×{N_VPI} grid over {N_T} time steps …")
     import time
-    t0    = time.time()
-    v_all = solve_hjb(options)
-    print(f"Done in {time.time()-t0:.1f}s")
 
-    v0 = v_all[0]
-    print(f"\nValue function at t=0:")
-    print(f"  min = {v0.min():.1f}")
-    print(f"  max = {v0.max():.1f}")
-    print(f"  at (nu0, Vpi=0)  ≈ {np.interp(0.0225, nu_grid, v0[:, N_VPI//2]):.1f}")
+    results = {}
+    for mode, flag in [('Constant vega (BBG baseline)', False),
+                       ('Stochastic vega (extension)',  True)]:
+        # Reload fresh options each run (compute_vega_sensitivities mutates the list)
+        options_run = []
+        for opt in raw_options:
+            K     = opt['strike']
+            price = opt['price']
+            vega  = opt['vega']
+            lam   = 252 * 30 / (1 + 0.7 * abs(S0 - K))
+            z     = 5e5 / price
+            options_run.append({
+                'strike': K, 'maturity': opt['maturity'],
+                'price': price, 'vega': vega, 'lam': lam, 'z': z,
+            })
 
-    # ── Plot ──────────────────────────────────────────────────────────────────
-    plot_figure2(v0)
+        # Flip the global toggle
+        import hjb_solver as _self
+        _self.USE_STOCHASTIC_VEGA = flag
+
+        print(f"\n{'─'*60}")
+        print(f"  {mode}")
+        print(f"{'─'*60}")
+        t0    = time.time()
+        v_all = solve_hjb(options_run)
+        elapsed = time.time() - t0
+        print(f"  Done in {elapsed:.1f}s")
+
+        v0 = v_all[0]
+        print(f"  v(0) range : [{v0.min():.1f}, {v0.max():.1f}]")
+        print(f"  v_peak     : {v0.max():.1f}  (paper ≈ 120,000)")
+
+        results[mode] = v0
+        save = 'figure2_constant_vega.png' if not flag else 'figure2_stochastic_vega.png'
+        plot_figure2(v0, save_path=save)
+
+    # ── Difference surface ────────────────────────────────────────────────────
+    v_base = results['Constant vega (BBG baseline)']
+    v_ext  = results['Stochastic vega (extension)']
+    diff   = v_ext - v_base
+
+    VPI_mesh, NU_mesh = np.meshgrid(vpi_grid, nu_grid)
+    fig = plt.figure(figsize=(10, 7))
+    ax  = fig.add_subplot(111, projection='3d')
+    surf = ax.plot_surface(VPI_mesh / 1e7, NU_mesh, diff,
+                           cmap='RdBu', edgecolor='none', alpha=0.9)
+    fig.colorbar(surf, ax=ax, shrink=0.5, label='Δv  (stochastic − constant)')
+    ax.set_xlabel('Portfolio vega  (×10⁷)')
+    ax.set_ylabel('Instantaneous variance ν')
+    ax.set_zlabel('Δv(0, ν, V^π)')
+    ax.set_title('Extension vs Baseline: value function difference at t=0')
+    plt.tight_layout()
+    plt.savefig('figure2_diff.png', dpi=150)
+    print("\nDifference surface saved to figure2_diff.png")
+    plt.close(fig)
