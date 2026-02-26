@@ -230,7 +230,7 @@ def compute_penalties(v):
     Running source terms in the HJB (equation 4 of the paper):
 
       + V^pi * (aP - aQ) / (2 * sqrt(nu))        — variance risk premium drift
-      - gamma * xi^2 * (1-rho^2) / 8 * (V^pi)^2  — inventory risk penalty
+      - gamma * xi^2 / 8 * (V^pi)^2               — inventory risk penalty
 
     Fix 1 — drift premium (previously missing):
       The term V^pi*(aP-aQ)/(2*sqrt(nu)) appears explicitly in eq. (4).
@@ -238,12 +238,6 @@ def compute_penalties(v):
       vs kappa_Q*theta_Q=0.0675), this term is positive for V^pi>0 and
       negative for V^pi<0, giving the correct asymmetric tilt to the surface.
       Its absence caused the surface to be too symmetric and inflated.
-
-    Fix 2 — (1-rho^2) correction (Appendix A.1):
-      When the market maker optimally hedges in the underlying, the effective
-      vega risk penalty becomes (1-rho^2)*xi^2/8 instead of xi^2/8.
-      With rho=-0.5, the factor is 0.75, reducing the penalty by 25%.
-      This matches the full optimal-hedging formulation from Appendix A.1.
 
     Shape: (N_NU, N_VPI)
     """
@@ -256,7 +250,7 @@ def compute_penalties(v):
     # — it tilts the surface but doesn't reduce the peak
     drift_premium = VPI * (aP_vals - aQ_vals) / (2.0 * np.sqrt(NU))
 
-    # ── Quadratic inventory risk penalty with (1-rho^2) correction ───────────
+    # ── Quadratic inventory risk penalty ────────────────────────────────────────
     risk_penalty = -(GAMMA * XI**2 / 8.0) * VPI**2
 
 
