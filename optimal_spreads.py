@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.special import expit
@@ -247,6 +248,259 @@ def plot_figures_9_13(spreads, options):
         plt.savefig(fname, dpi=150)
         print(f"Saved {fname}")
         plt.show()
+
+
+# ── Extension A: ask-to-mid / price vs portfolio vega ─────────────────────────
+def plot_ask_to_mid(spreads, options, save_dir=None):
+    """
+    Mirrors Figures 4-8 but for the *ask* side: delta_ask / price vs Vπ.
+
+    δ_ask is the optimal ask-to-mid offset: the market maker posts
+    ask = mid + δ_ask.  When the portfolio is net *long* vega (Vπ > 0)
+    the MM wants to sell (reduce inventory), so δ_ask shrinks to attract
+    sellers.  When Vπ < 0 the MM prefers not to sell, so δ_ask widens.
+    """
+    STRIKES    = [8, 9, 10, 11, 12]
+    MATURITIES = [1.0, 1.5, 2.0, 3.0]
+    markers    = ['*', '^', 'o', 's']
+    vpi_plot   = vpi_grid / 1e7
+
+    for fig_idx, K in enumerate(STRIKES):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for m_idx, Tm in enumerate(MATURITIES):
+            key = (K, Tm)
+            if key not in spreads:
+                continue
+            s    = spreads[key]
+            da   = s['delta_ask']
+            mask = da > DELTA_INF + 0.1
+            ax.scatter(vpi_plot[mask], da[mask] / s['price'],
+                       s=10, marker=markers[m_idx],
+                       label=f"(K,T)=({K},{Tm})  C={s['price']:.2f}")
+
+        ax.axvline(0, color='gray', lw=0.8, ls='--')
+        ax.axhline(0, color='gray', lw=0.8, ls=':')
+        ax.set_xlabel('Portfolio vega  (×10⁷)')
+        ax.set_ylabel('Optimal ask-to-mid / price')
+        ax.set_title(f'Extension A: Ask-to-mid / price  (K={K})')
+        ax.legend(fontsize=7)
+        # Annotate the negative region
+        ax.annotate('δ_a < 0: MM posts below mid\n(aggressive selling to reduce long vega)',
+                    xy=(0.98, 0.02), xycoords='axes fraction',
+                    ha='right', va='bottom', fontsize=6.5,
+                    bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.8))
+        plt.tight_layout()
+        fname = f'ext_ask_to_mid_K{K}.png'
+        dst   = os.path.join(save_dir, fname) if save_dir else fname
+        plt.savefig(dst, dpi=150)
+        plt.close()
+        print(f"  → {fname}")
+
+
+# ── Extension B: bid–ask spread / price vs portfolio vega ─────────────────────
+def plot_bid_ask_spread(spreads, options, save_dir=None):
+    """
+    Full bid–ask spread = δ_ask + δ_bid, divided by option price.
+
+    Key observations:
+    • At Vπ = 0 the spread is symmetric and close to its minimum — the MM
+      has no inventory pressure.
+    • As |Vπ| grows the spread widens: the side that would *increase* the
+      imbalance sees a larger offset, dominating the total.
+    • The spread is *not* perfectly symmetric about Vπ = 0 because of the
+      variance risk premium term (aP − aQ), which tilts the value surface.
+    """
+    STRIKES    = [8, 9, 10, 11, 12]
+    MATURITIES = [1.0, 1.5, 2.0, 3.0]
+    markers    = ['*', '^', 'o', 's']
+    vpi_plot   = vpi_grid / 1e7
+
+    for fig_idx, K in enumerate(STRIKES):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for m_idx, Tm in enumerate(MATURITIES):
+            key = (K, Tm)
+            if key not in spreads:
+                continue
+            s     = spreads[key]
+            da    = s['delta_ask']
+            db    = s['delta_bid']
+            total = da + db            # full spread
+            mask  = (da > DELTA_INF + 0.1) & (db > DELTA_INF + 0.1)
+            ax.scatter(vpi_plot[mask], total[mask] / s['price'],
+                       s=10, marker=markers[m_idx],
+                       label=f"(K,T)=({K},{Tm})  C={s['price']:.2f}")
+
+        ax.axvline(0, color='gray', lw=0.8, ls='--')
+        ax.set_xlabel('Portfolio vega  (×10⁷)')
+        ax.set_ylabel('Bid–ask spread / price')
+        ax.set_title(f'Extension B: Bid–ask spread / price  (K={K})')
+        ax.legend(fontsize=7)
+        plt.tight_layout()
+        fname = f'ext_spread_K{K}.png'
+        dst   = os.path.join(save_dir, fname) if save_dir else fname
+        plt.savefig(dst, dpi=150)
+        plt.close()
+        print(f"  → {fname}")
+
+
+# ── Extension C: spread vs strike at fixed portfolio-vega levels ──────────────
+def plot_spread_vs_strike(spreads, options, save_dir=None):
+    """
+    For each maturity, plot the full spread (δ_a + δ_b) vs strike at
+    five fixed portfolio-vega levels:
+
+      Vπ / V_bar ∈ {−0.8, −0.4, 0, +0.4, +0.8}
+
+    This shows how the strike smile of optimal spreads changes with
+    inventory.  Commentary on the net-short-vega regime (Vπ ≪ 0):
+
+    When the market maker is heavily net short vega, buying options reduces
+    the magnitude of the (negative) vega exposure.  Therefore:
+      • The *bid* offset δ_b shrinks — the MM is eager to buy and posts
+        aggressive (tight) bids.
+      • The *ask* offset δ_a widens — the MM is reluctant to sell more
+        options that would deepen the short-vega position.
+      • The total spread is wider than at Vπ = 0, dominated by the
+        wide ask side.
+      • The effect is strongest for high-vega (near ATM, long maturity)
+        options because each trade shifts Vπ by z·V_i, so high vega
+        means a larger inventory change per lot.
+    Conversely, at very positive Vπ the roles flip: asks are tight and
+    bids are wide.
+    """
+    STRIKES    = [8, 9, 10, 11, 12]
+    MATURITIES = [1.0, 1.5, 2.0, 3.0]
+
+    # Fixed Vπ levels as fractions of V_bar
+    vpi_fracs = [-0.8, -0.4, 0.0, 0.4, 0.8]
+    vpi_vals  = [f * V_BAR for f in vpi_fracs]
+    labels    = [f"Vπ={f:+.1f}·V̄" for f in vpi_fracs]
+    markers   = ['v', 's', 'o', '^', 'D']
+    colors    = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+    for Tm in MATURITIES:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for v_idx, (vpi_val, lab) in enumerate(zip(vpi_vals, labels)):
+            K_arr     = []
+            spread_arr = []
+            for K in STRIKES:
+                key = (K, Tm)
+                if key not in spreads:
+                    continue
+                s  = spreads[key]
+                da_raw = s['delta_ask']
+                db_raw = s['delta_bid']
+                # Mask out sentinel values before interpolation so np.interp
+                # never blends valid data with DELTA_INF = -1.0
+                valid = (da_raw > DELTA_INF + 0.1) & (db_raw > DELTA_INF + 0.1)
+                if valid.sum() < 2:
+                    continue
+                vpi_valid = vpi_grid[valid]
+                # Skip if requested Vπ is outside the valid range
+                if vpi_val < vpi_valid[0] or vpi_val > vpi_valid[-1]:
+                    continue
+                da = np.interp(vpi_val, vpi_valid, da_raw[valid])
+                db = np.interp(vpi_val, vpi_valid, db_raw[valid])
+                total = da + db
+                if total > 0:
+                    K_arr.append(K)
+                    spread_arr.append(total / s['price'])
+
+            if K_arr:
+                ax.plot(K_arr, spread_arr, marker=markers[v_idx],
+                        color=colors[v_idx], label=lab, lw=1.2, ms=7)
+
+        ax.set_xlabel('Strike K')
+        ax.set_ylabel('Bid–ask spread / price')
+        ax.set_title(f'Extension C: Spread vs strike  (T={Tm})')
+        ax.legend(fontsize=8)
+        plt.tight_layout()
+        fname = f'ext_spread_vs_strike_T{Tm}.png'
+        dst   = os.path.join(save_dir, fname) if save_dir else fname
+        plt.savefig(dst, dpi=150)
+        plt.close()
+        print(f"  → {fname}")
+
+
+# ── Extension commentary: net-short-vega analysis ────────────────────────────
+def print_short_vega_commentary(spreads, options):
+    """
+    Print a summary of spread behaviour at very negative portfolio vega.
+    """
+    print()
+    print("─" * 72)
+    print("  Extension: Net short-vega (Vπ ≪ 0) behaviour summary")
+    print("─" * 72)
+    print("""
+  When the market maker is heavily net SHORT vega (Vπ < 0):
+
+  1. Bid offset δ_b is TIGHT (small):
+     – The MM wants to BUY options to reduce the magnitude of the
+       negative vega exposure, so it posts aggressive bids.
+
+  2. Ask offset δ_a is WIDE (large):
+     – Selling more options would deepen the short-vega position,
+       increasing inventory risk, so the MM discourages selling by
+       posting a wide ask.
+
+  3. Total spread is WIDER than at Vπ = 0:
+     – The wide ask side dominates; total spread = δ_a + δ_b > spread(0).
+
+  4. Asymmetry across strikes:
+     – High-vega options (ATM, long maturity) show the largest
+       spread widening because each fill shifts Vπ by z·V_i.
+     – Deep ITM/OTM options with small vega are less affected.
+
+  5. Variance risk premium tilt:
+     – The (aP − aQ) drift term is positive near ν₀, so the value
+       function is tilted upward for Vπ > 0. This slightly reduces
+       the penalty at negative Vπ relative to a symmetric model.
+""")
+    # Numerical example
+    vpi_neg = -0.8 * V_BAR
+    vpi_0   = 0.0
+    print(f"  {'K':>5} {'T':>5}  {'spread(Vπ=−0.8V̄)/C':>22}  "
+          f"{'spread(Vπ=0)/C':>16}  {'ratio':>7}")
+    print("  " + "─" * 70)
+    STRIKES    = [8, 9, 10, 11, 12]
+    MATURITIES = [1.0, 2.0, 3.0]
+    for K in STRIKES:
+        for Tm in MATURITIES:
+            key = (K, Tm)
+            if key not in spreads:
+                continue
+            s   = spreads[key]
+            da_raw = s['delta_ask']
+            db_raw = s['delta_bid']
+            valid  = (da_raw > DELTA_INF + 0.1) & (db_raw > DELTA_INF + 0.1)
+            if valid.sum() < 2:
+                print(f"  {K:>5} {Tm:>5.1f}  {'(boundary)':>22}  "
+                      f"{'—':>16}  {'—':>7}")
+                continue
+            vpi_valid = vpi_grid[valid]
+            # Check both query points lie within valid range
+            if vpi_neg < vpi_valid[0] or vpi_0 > vpi_valid[-1]:
+                print(f"  {K:>5} {Tm:>5.1f}  {'(boundary)':>22}  "
+                      f"{'—':>16}  {'—':>7}")
+                continue
+            da_neg = np.interp(vpi_neg, vpi_valid, da_raw[valid])
+            db_neg = np.interp(vpi_neg, vpi_valid, db_raw[valid])
+            da_0   = np.interp(vpi_0,   vpi_valid, da_raw[valid])
+            db_0   = np.interp(vpi_0,   vpi_valid, db_raw[valid])
+            sp_neg = (da_neg + db_neg) / s['price']
+            sp_0   = (da_0   + db_0)   / s['price']
+            # Skip if either total spread is non-positive
+            if sp_neg <= 0 or sp_0 <= 0:
+                print(f"  {K:>5} {Tm:>5.1f}  {'(boundary)':>22}  "
+                      f"{'—':>16}  {'—':>7}")
+                continue
+            if sp_0 > 1e-6:
+                ratio = sp_neg / sp_0
+            else:
+                ratio = float('nan')
+            print(f"  {K:>5} {Tm:>5.1f}  {sp_neg:>22.5f}  "
+                  f"{sp_0:>16.5f}  {ratio:>7.2f}×")
+    print()
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

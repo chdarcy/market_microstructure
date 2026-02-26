@@ -11,7 +11,7 @@ from scipy.special import expit
 #         where ∂V^π/∂ν = Σᵢ qᵢ · ∂V^i/∂ν is pre-computed from option data
 #         via a second finite-difference pass over ν (see compute_vega_sensitivities).
 #         Options must carry a 'dvega_dnu' field (added by solve_hjb automatically).
-USE_STOCHASTIC_VEGA = True
+USE_STOCHASTIC_VEGA = False
 
 # ── Grid parameters ────────────────────────────────────────────────────────────
 N_T    = 180

@@ -3,3 +3,5 @@ figures/
 .venv/
 test/
 1907.12433v7.pdf
+results/*
+*.odt

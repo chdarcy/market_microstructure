@@ -205,6 +205,24 @@ def step3_optimal_spreads(v0, options):
     # ── Figures 9-13 ──────────────────────────────────────────────────────
     _save_iv_figures(spreads, options, vpi_grid, DELTA_INF, S0, NU0)
 
+    # ── Extension plots ───────────────────────────────────────────────────
+    from optimal_spreads import (
+        plot_ask_to_mid, plot_bid_ask_spread,
+        plot_spread_vs_strike, print_short_vega_commentary,
+    )
+    banner("Extension · Ask-to-mid, bid–ask spread, spread vs strike")
+
+    print("\n  A) Ask-to-mid / price  vs  portfolio vega")
+    plot_ask_to_mid(spreads, options, save_dir=FIGURES_DIR)
+
+    print("\n  B) Bid–ask spread / price  vs  portfolio vega")
+    plot_bid_ask_spread(spreads, options, save_dir=FIGURES_DIR)
+
+    print("\n  C) Spread vs strike at fixed Vπ levels")
+    plot_spread_vs_strike(spreads, options, save_dir=FIGURES_DIR)
+
+    print_short_vega_commentary(spreads, options)
+
     return spreads
 
 
@@ -472,6 +490,23 @@ def _augment_options(raw):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 7.  Parameter sweeps — α, β, intensity function
+# ─────────────────────────────────────────────────────────────────────────────
+def step7_param_sweeps(options):
+    banner("Step 7 · Parameter sweeps  (α, β, intensity)")
+
+    from param_sweeps import run_all_sweeps, SWEEP_DIR
+
+    print(f"  Output directory: {os.path.relpath(SWEEP_DIR, ROOT)}/")
+    print(f"  This may take a few minutes (multiple HJB re-solves) …\n")
+
+    fnames = run_all_sweeps(options)
+
+    print(f"\n  → {len(fnames)} sweep figures saved to "
+          f"{os.path.relpath(SWEEP_DIR, ROOT)}/")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
@@ -501,6 +536,9 @@ def main():
 
     # 6 — Summary
     step6_summary(raw, v0, spreads, options)
+
+    # 7 — Parameter sweeps (α, β, intensity function)
+    step7_param_sweeps(options)
 
     # Done
     elapsed = time.time() - wall_t0
