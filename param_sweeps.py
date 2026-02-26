@@ -526,18 +526,17 @@ def _solve_with_params(options, alpha, beta, intensity_name="logistic"):
         v_all = solve_hjb(options)
         v0 = v_all[0]
 
-        # For queue-reactive, the explicit Euler PDE accumulates ~8×
-        # more grid-scale noise in v0 than logistic (the QR Hamiltonian
-        # has broader support), and the closed-form FOC amplifies this
-        # by c/(c−1) ≈ 4×, producing visibly choppy spread curves.
-        # We apply a light Savitzky–Golay smooth to each ν-row of v0
-        # before computing spreads.  This is pure post-processing on
-        # the converged PDE solution — the HJB itself is unchanged.
-        # Window=19 (47% of N_VPI=40), polyorder=3: removes noise while
-        # preserving U-shape curvature (max bias < 0.5% of v0 range).
+        # For queue-reactive, the explicit Euler PDE accumulates
+        # grid-scale noise that the FOC amplifies by c/(c−1) ≈ 4×.
+        # We apply a light Savitzky–Golay filter to each ν-row of v0
+        # to remove 1–2 grid-point oscillations while preserving the
+        # genuine curvature structure (including the broader spread
+        # near V^π = 0 that is a real feature of the power-law model).
+        # Window = 7, polyorder = 3 targets only the highest-frequency
+        # noise without distorting the economic shape.
         if _is_qr:
             for i in range(v0.shape[0]):
-                v0[i, :] = savgol_filter(v0[i, :], window_length=19,
+                v0[i, :] = savgol_filter(v0[i, :], window_length=7,
                                          polyorder=3)
 
         # Compute spreads
