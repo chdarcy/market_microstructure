@@ -2,7 +2,15 @@
 """
 main.py — Full pipeline for "Algorithmic Market Making for Options"
 ===================================================================
-Reproduces Figures 1-13 from Baldacci, Bergault & Guéant (2020).
+Reproduces Figures 1-13 from Baldacci, Bergault & Guéant (2020) and
+runs extended analysis (parameter sweeps, alternative intensities,
+queue-reactive LOB model).
+
+Output folders
+--------------
+  figures/original/       — Figures 1-13 from the paper + extension plots
+  figures/param_sweeps/   — α / β parameter sensitivity analysis
+  figures/intensity/      — Intensity family comparison + QR CTMC validation
 
 Steps
 -----
@@ -10,13 +18,13 @@ Steps
 2.  HJB solver      → value function v(0,ν,Vπ), Figure 2
 3.  Optimal spreads  → Figures 4-8 (bid/price) and 9-13 (relative IV)
 4.  Convergence      → Figure 3 (stationarity of quotes)
-5.  (placeholder)    simulate.py — market simulation (not yet implemented)
-6.  Summary table    → comparison with paper values
+5.  Summary table    → comparison with paper values
+6.  Parameter sweeps → α, β sensitivity
+7.  Intensity        → logistic / exponential / queue-reactive + CTMC
 """
 
 import os
 import sys
-import shutil
 import time
 
 import numpy as np
@@ -28,7 +36,10 @@ import matplotlib.pyplot as plt
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-FIGURES_DIR = os.path.join(ROOT, "figures")
+FIGURES_DIR   = os.path.join(ROOT, "figures")
+ORIGINAL_DIR  = os.path.join(FIGURES_DIR, "original")
+SWEEP_DIR     = os.path.join(FIGURES_DIR, "param_sweeps")
+INTENSITY_DIR = os.path.join(FIGURES_DIR, "intensity")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -41,14 +52,6 @@ def banner(msg: str) -> None:
     print("═" * width)
     print(f"  {msg}")
     print("═" * width)
-
-
-def move_figure(src_name: str, dst_name: str | None = None) -> None:
-    """Move a figure from the working directory into figures/."""
-    src = os.path.join(ROOT, src_name)
-    dst = os.path.join(FIGURES_DIR, dst_name or src_name)
-    if os.path.isfile(src):
-        shutil.move(src, dst)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,9 +111,9 @@ def step1_heston_pricer():
     ax.set_title("Figure 1 – Implied Volatility Surface")
     ax.view_init(elev=25, azim=-55)
     plt.tight_layout()
-    plt.savefig(os.path.join(FIGURES_DIR, "figure01_iv_surface.png"), dpi=150)
+    plt.savefig(os.path.join(ORIGINAL_DIR, "figure01_iv_surface.png"), dpi=150)
     plt.close()
-    print("\n→ Saved figures/figure01_iv_surface.png")
+    print("\n→ Saved figures/original/figure01_iv_surface.png")
 
     return raw
 
@@ -149,7 +152,7 @@ def step2_hjb_solver(options):
     print(f"  v_peak        : {v0.max():.1f}  (paper ≈ 120,000)")
 
     # ── Figure 2 ──────────────────────────────────────────────────────────
-    save_path = os.path.join(FIGURES_DIR, "figure02_value_function.png")
+    save_path = os.path.join(ORIGINAL_DIR, "figure02_value_function.png")
     VPI_mesh, NU_mesh = np.meshgrid(vpi_grid, nu_grid)
     fig = plt.figure(figsize=(10, 7))
     ax = fig.add_subplot(111, projection="3d")
@@ -213,13 +216,13 @@ def step3_optimal_spreads(v0, options):
     banner("Extension · Ask-to-mid, bid–ask spread, spread vs strike")
 
     print("\n  A) Ask-to-mid / price  vs  portfolio vega")
-    plot_ask_to_mid(spreads, options, save_dir=FIGURES_DIR)
+    plot_ask_to_mid(spreads, options, save_dir=ORIGINAL_DIR)
 
     print("\n  B) Bid–ask spread / price  vs  portfolio vega")
-    plot_bid_ask_spread(spreads, options, save_dir=FIGURES_DIR)
+    plot_bid_ask_spread(spreads, options, save_dir=ORIGINAL_DIR)
 
     print("\n  C) Spread vs strike at fixed Vπ levels")
-    plot_spread_vs_strike(spreads, options, save_dir=FIGURES_DIR)
+    plot_spread_vs_strike(spreads, options, save_dir=ORIGINAL_DIR)
 
     print_short_vega_commentary(spreads, options)
 
@@ -254,7 +257,7 @@ def _save_spread_figures(spreads, options, vpi_grid, DELTA_INF,
         ax.legend(fontsize=7)
         plt.tight_layout()
         fname = f"figure{fig_num:02d}_K{K}_spread.png"
-        plt.savefig(os.path.join(FIGURES_DIR, fname), dpi=150)
+        plt.savefig(os.path.join(ORIGINAL_DIR, fname), dpi=150)
         plt.close()
         print(f"  → {fname}")
 
@@ -293,7 +296,7 @@ def _save_iv_figures(spreads, options, vpi_grid, DELTA_INF, S0, NU0):
         ax.legend(fontsize=7)
         plt.tight_layout()
         fname = f"figure{fig_num:02d}_K{K}_relIV.png"
-        plt.savefig(os.path.join(FIGURES_DIR, fname), dpi=150)
+        plt.savefig(os.path.join(ORIGINAL_DIR, fname), dpi=150)
         plt.close()
         print(f"  → {fname}")
 
@@ -366,7 +369,7 @@ def step4_convergence(v_all, options):
                  label="Portfolio vega V^π (×10⁷)")
     fig.subplots_adjust(left=0.07, right=0.88, wspace=0.28)
 
-    save_path = os.path.join(FIGURES_DIR, "figure03_convergence.png")
+    save_path = os.path.join(ORIGINAL_DIR, "figure03_convergence.png")
     plt.savefig(save_path, dpi=150)
     plt.close()
     print(f"\n→ Saved {os.path.relpath(save_path, ROOT)}")
@@ -375,16 +378,10 @@ def step4_convergence(v_all, options):
 # ─────────────────────────────────────────────────────────────────────────────
 # 5.  Market simulation (placeholder)
 # ─────────────────────────────────────────────────────────────────────────────
-def step5_simulation():
-    banner("Step 5 · Market simulation")
-    print("  ⚠  simulate.py not yet implemented — skipping.")
-
-
+# 5.  Summary comparison table
 # ─────────────────────────────────────────────────────────────────────────────
-# 6.  Summary comparison table
-# ─────────────────────────────────────────────────────────────────────────────
-def step6_summary(raw_options, v0, spreads, options):
-    banner("Step 6 · Summary comparison with paper")
+def step5_summary(raw_options, v0, spreads, options):
+    banner("Step 5 · Summary comparison with paper")
 
     from hjb_solver import vpi_grid
 
@@ -450,11 +447,15 @@ def step6_summary(raw_options, v0, spreads, options):
               f"{db/opt['price']:>13.5f}")
 
     # ── D. Figure inventory ───────────────────────────────────────────────
-    print("\nD) Figures saved to figures/")
-    figs = sorted(f for f in os.listdir(FIGURES_DIR) if f.endswith(".png"))
-    for f in figs:
-        print(f"  • {f}")
-    print(f"\n  Total: {len(figs)} figures")
+    print("\nD) Figures saved:")
+    for label, d in [("original", ORIGINAL_DIR),
+                     ("param_sweeps", SWEEP_DIR),
+                     ("intensity", INTENSITY_DIR)]:
+        if os.path.isdir(d):
+            figs = sorted(f for f in os.listdir(d) if f.endswith(".png"))
+            print(f"  figures/{label}/  — {len(figs)} figures")
+            for f in figs:
+                print(f"    • {f}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -490,20 +491,52 @@ def _augment_options(raw):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7.  Parameter sweeps — α, β, intensity function
+# 7.  Parameter sweeps — α, β
 # ─────────────────────────────────────────────────────────────────────────────
 def step7_param_sweeps(options):
-    banner("Step 7 · Parameter sweeps  (α, β, intensity)")
+    banner("Step 7 · Parameter sweeps  (α, β)")
 
-    from param_sweeps import run_all_sweeps, SWEEP_DIR
+    from param_sweeps import (
+        sweep_alpha, sweep_beta, print_sweep_summary,
+    )
 
-    print(f"  Output directory: {os.path.relpath(SWEEP_DIR, ROOT)}/")
-    print(f"  This may take a few minutes (multiple HJB re-solves) …\n")
+    print(f"  Output directory: {os.path.relpath(SWEEP_DIR, ROOT)}/\n")
 
-    fnames = run_all_sweeps(options)
+    print("  A) Alpha sweep")
+    res_a, fnames_a = sweep_alpha(options, save_dir=SWEEP_DIR)
+    print_sweep_summary(res_a, "alpha")
 
-    print(f"\n  → {len(fnames)} sweep figures saved to "
+    print("\n  B) Beta sweep")
+    res_b, fnames_b = sweep_beta(options, save_dir=SWEEP_DIR)
+    print_sweep_summary(res_b, "beta")
+
+    n_total = len(fnames_a) + len(fnames_b)
+    print(f"\n  → {n_total} sweep figures saved to "
           f"{os.path.relpath(SWEEP_DIR, ROOT)}/")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8.  Intensity families + Queue-Reactive CTMC
+# ─────────────────────────────────────────────────────────────────────────────
+def step8_intensity(options):
+    banner("Step 8 · Intensity families + Queue-Reactive CTMC")
+
+    from param_sweeps import (
+        sweep_intensity, print_sweep_summary, run_queue_reactive,
+    )
+
+    print(f"  Output directory: {os.path.relpath(INTENSITY_DIR, ROOT)}/\n")
+
+    print("  C) Intensity family sweep")
+    res_c, fnames_c = sweep_intensity(options, save_dir=INTENSITY_DIR)
+    print_sweep_summary(res_c, "intensity")
+
+    print("\n  D) Queue-reactive L1 LOB model")
+    fnames_d = run_queue_reactive(save_dir=INTENSITY_DIR)
+
+    n_total = len(fnames_c) + len(fnames_d)
+    print(f"\n  → {n_total} intensity figures saved to "
+          f"{os.path.relpath(INTENSITY_DIR, ROOT)}/")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -512,8 +545,9 @@ def step7_param_sweeps(options):
 def main():
     wall_t0 = time.time()
 
-    # Prepare output directory
-    os.makedirs(FIGURES_DIR, exist_ok=True)
+    # Prepare output directories
+    for d in [ORIGINAL_DIR, SWEEP_DIR, INTENSITY_DIR]:
+        os.makedirs(d, exist_ok=True)
 
     # 1 — Heston pricer
     raw = step1_heston_pricer()
@@ -531,19 +565,25 @@ def main():
     # 4 — Convergence (Figure 3)
     step4_convergence(v_all, options)
 
-    # 5 — Simulation (placeholder)
-    step5_simulation()
+    # 5 — Summary
+    step5_summary(raw, v0, spreads, options)
 
-    # 6 — Summary
-    step6_summary(raw, v0, spreads, options)
-
-    # 7 — Parameter sweeps (α, β, intensity function)
+    # 6 — Parameter sweeps (α, β)
     step7_param_sweeps(options)
+
+    # 7 — Intensity families + Queue-Reactive CTMC
+    step8_intensity(options)
 
     # Done
     elapsed = time.time() - wall_t0
     banner(f"Pipeline complete — total wall time {elapsed:.1f}s")
-    print(f"  All figures in:  {os.path.relpath(FIGURES_DIR, ROOT)}/\n")
+    for label, d in [("original", ORIGINAL_DIR),
+                     ("param_sweeps", SWEEP_DIR),
+                     ("intensity", INTENSITY_DIR)]:
+        if os.path.isdir(d):
+            n = len([f for f in os.listdir(d) if f.endswith(".png")])
+            print(f"  figures/{label:15s}  {n} figures")
+    print()
 
 
 if __name__ == "__main__":

@@ -44,9 +44,11 @@ from optimal_spreads import (
     compute_all_spreads, NU0, DELTA_INF, get_options,
 )
 
-ROOT        = os.path.dirname(os.path.abspath(__file__))
-SWEEP_DIR   = os.path.join(ROOT, "figures", "param_sweeps")
+ROOT          = os.path.dirname(os.path.abspath(__file__))
+SWEEP_DIR     = os.path.join(ROOT, "figures", "param_sweeps")
+INTENSITY_DIR = os.path.join(ROOT, "figures", "intensity")
 os.makedirs(SWEEP_DIR, exist_ok=True)
+os.makedirs(INTENSITY_DIR, exist_ok=True)
 
 # ── Baseline parameter values ─────────────────────────────────────────────────
 ALPHA_BASE = hjb.ALPHA
@@ -774,9 +776,7 @@ def sweep_intensity(options, save_dir=None):
 
     Returns list of (label, color, spreads).
     """
-    save_dir = save_dir or SWEEP_DIR
-
-    # ── Pre-compute empirical Λ(δ) from CTMC if not already cached ──
+    save_dir = save_dir or INTENSITY_DIR    # ── Pre-compute empirical Λ(δ) from CTMC if not already cached ──
     if _QR_LAMBDA_INTERP is None:
         print("    [QR bridge] Running CTMC to estimate fill probability …",
               end="", flush=True)
@@ -949,8 +949,7 @@ def print_sweep_summary(results, param_name):
 #      d) Queue size distributions
 # ═══════════════════════════════════════════════════════════════════════════════
 
-QR_DIR = os.path.join(ROOT, "figures", "queue_reactive")
-os.makedirs(QR_DIR, exist_ok=True)
+QR_DIR = INTENSITY_DIR   # QR validation plots go into the intensity folder
 
 # ── Event labels and their effect on (Q_b, Q_a) ──────────────────────────────
 EVENT_NAMES = ["L_b", "C_b", "M_b", "L_a", "C_a", "M_a"]
