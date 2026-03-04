@@ -235,7 +235,7 @@ $$\Lambda(0) = \frac{\lambda}{1 + e^{\alpha}}$$
 
 The sweep re-solves the HJB for each $\alpha \in \{0.2, 0.5, 0.7, 1.0, 1.5\}$ with $\beta$ fixed at baseline, then overlays the resulting spread curves.
 
-**Key finding**: Higher $\alpha$ uniformly widens spreads (both bid and ask shift outward), confirming that reduced fill probability at mid forces the MM to demand greater compensation per trade.
+**Key finding**: Higher $\alpha$ predominantly *narrows* spreads (both bid and ask shift inward). Although a higher $\alpha$ reduces $\Lambda(0)$ and hence the fill rate at mid, the MM's best response is to tighten quotes to maintain order flow — the reduced baseline fill rate makes each marginal unit of spread width relatively more costly in terms of lost fills. The effect is modest (approximately 5% variation across the full sweep range) and exhibits slight non-monotonicity near $\alpha = 1.5$.
 
 ### 6.2 Beta Sweep (Section B)
 
@@ -306,7 +306,7 @@ This is a **power-law** intensity fitted to empirical fill rates obtained from a
 - **FOC**: $\delta^* = \frac{1 + cbp}{b(c-1)}$ — linear in $p$ with slope $\frac{c}{c-1} \approx 4.03$
 - **Inverse**: $\Lambda^{-1}(y) = \frac{(a/y)^{1/c} - 1}{b}$ — closed form, no root-finding
 
-**[CORRECTED]** The power-law parameters are fitted to raw empirical fill rates from the CTMC simulation using nonlinear least squares (`scipy.optimize.curve_fit`). Typical fitted values are $a \approx 3.06$, $b \approx 328$, $c \approx 1.33$ with RMSE ~3%, though exact values vary across Monte Carlo runs. The fitted exponent $c \approx 1.33$ falls squarely within the empirical range of 1.3–1.6 reported by Bouchaud et al. (2002) for order placement distributions on the Paris Bourse, and is consistent with the power-law fill-rate decay documented across multiple markets in Gould et al. (2013, §4.2). The rescaling to match the option-specific arrival rate $\lambda_i$ uses $\text{scale} = \lambda_i / a$, so that $\Lambda(0) = a \cdot \text{scale} = \lambda_i$.
+The power-law parameters are fitted to raw empirical fill rates from the CTMC simulation using nonlinear least squares (`scipy.optimize.curve_fit`). Typical fitted values are $a \approx 3.06$, $b \approx 328$, $c \approx 1.33$ with RMSE ~3%, though exact values vary across Monte Carlo runs. The fitted exponent $c \approx 1.33$ falls squarely within the empirical range of 1.3–1.6 reported by Bouchaud et al. (2002) for order placement distributions on the Paris Bourse, and is consistent with the power-law fill-rate decay documented across multiple markets in Gould et al. (2013, §4.2). The rescaling to match the option-specific arrival rate $\lambda_i$ uses $\text{scale} = \lambda_i / a$, so that $\Lambda(0) = a \cdot \text{scale} = \lambda_i$.
 
 ### 7.5 Hamiltonian Derivation for the Power-Law
 
@@ -326,7 +326,7 @@ The second-order condition is satisfied when $c > 1$ (which holds for the fitted
 
 $$H(p) = \frac{a \cdot \text{scale}}{(1+b\delta^*)^c} \cdot (\delta^* - p)$$
 
-**[CORRECTED]** In the implementation, $\delta^*$ is clipped to $[10^{-10}, \infty)$ to avoid numerical issues at the boundary. If $\delta^*_{\text{foc}} < 0$ (which occurs when $p < -1/(cb)$), the boundary value $\delta = 0$ is used in the Hamiltonian, giving $H_0 = a \cdot \text{scale} \cdot (-p)$. The final Hamiltonian takes the maximum of the interior FOC value and the boundary value: $H = \max(H_{\text{foc}}, H_0)$.
+In the implementation, $\delta^*$ is clipped to $[10^{-10}, \infty)$ to avoid numerical issues at the boundary. If $\delta^*_{\text{foc}} < 0$ (which occurs when $p < -1/(cb)$), the boundary value $\delta = 0$ is used in the Hamiltonian, giving $H_0 = a \cdot \text{scale} \cdot (-p)$. The final Hamiltonian takes the maximum of the interior FOC value and the boundary value: $H = \max(H_{\text{foc}}, H_0)$.
 
 ### 7.6 Handling Negative Offsets (Quote Withdrawal)
 
@@ -460,9 +460,9 @@ The simulator uses the standard **competing exponentials** (Gillespie 1977) algo
 3. Time to next event: $\Delta t \sim \text{Exp}(\Lambda_{\text{tot}})$
 4. Event type: categorical draw with $\Pr(e) = \lambda_e / \Lambda_{\text{tot}}$
 5. Apply event: update $(Q^b, Q^a)$ according to the event effect table
-6. **Queue depletion**: If $Q^b = 0$ or $Q^a = 0$, the mid-price shifts by one tick ($\pm 0.01$) and both queues are **reset** by sampling from a geometric distribution with mean $\mu = 8$ lots (`QR_Q_MEAN = 8`), capped at $Q_{\max} = 30$ (`QR_Q_MAX = 30`)
+6. **Queue depletion**: If $Q^b = 0$ or $Q^a = 0$, the mid-price shifts by one tick ($\pm 0.01$) and both queues are **reset** by sampling from a geometric distribution with mean $\mu = 8$ lots (`QR_Q_RESET_MU = 8`), capped at $Q_{\max} = 30$ (`QR_Q_MAX = 30`)
 
-**[CORRECTED]** Queues are capped at $Q_{\max} = 30$ lots to bound the state space. The fill-probability bridge simulation runs for `T_seconds = 14,400` seconds (4 hours), while the Section D validation pipeline runs for `T_seconds = 7,200` seconds (2 hours). Both use time-based termination (not event-count based).
+Queues are capped at $Q_{\max} = 30$ lots to bound the state space. The fill-probability bridge simulation runs for `T_seconds = 14,400` seconds (4 hours), while the Section D validation pipeline runs for `T_seconds = 7,200` seconds (2 hours). Both use time-based termination (not event-count based).
 
 ### 8.4 Estimation Pipeline
 
@@ -488,15 +488,15 @@ The mapping works as follows:
 
 1. **Offset to queue position**: $k(\delta) = \max(1, \text{round}(1 + \kappa \cdot \delta))$ where $\kappa = 500$ lots per price unit (`QR_KAPPA = 500`). At $\delta = 0$, the MM is at the front of the queue ($k = 1$); at $\delta = 0.01$ (one tick), the MM is at position $k = 6$.
 
-2. **[CORRECTED] Queue-position fill tracking**: During the CTMC simulation, for each $\delta$ on a grid of `QR_N_DELTAS = 80` points uniformly spaced in $[0, d_{\text{hi}}]$ where $d_{\text{hi}} = (Q_{\max} - 1) / \kappa = 0.058$, we track a **virtual MM order** sitting at position $k(\delta)$ in the queue. Each virtual order maintains a `remaining` priority counter initialised to $k(\delta)$. The counter decreases by 1 when:
+2. **Queue-position fill tracking**: During the CTMC simulation, for each $\delta$ on a grid of `QR_N_DELTAS = 80` points uniformly spaced in $[0, d_{\text{hi}}]$ where $d_{\text{hi}} = (Q_{\max} - 1) / \kappa = 0.058$, we track a **virtual MM order** sitting at position $k(\delta)$ in the queue. Each virtual order maintains a `remaining` priority counter initialised to $k(\delta)$. The counter decreases by 1 when:
    - A **market order** hits the MM's side (unconditionally)
    - A **cancellation** occurs on the MM's side (with probability $\min(\text{remaining} - 1, \, Q) / Q$, approximating the chance it hits a lot ahead of the MM — the $-1$ excludes the MM's own position from the cancellation pool)
 
 3. **Fill event**: When `remaining` reaches 0, the MM is filled and the fill counter increments. The order immediately re-enters at position $k(\delta)$.
 
-4. **[CORRECTED] Queue reset handling**: When a queue depletes (price move), all virtual orders on that side are reset to their initial positions $k(\delta)$.
+4. **Queue reset handling**: When a queue depletes (price move), all virtual orders on that side are reset to their initial positions $k(\delta)$.
 
-5. **[CORRECTED] Bid/ask tracking**: Fill rates are tracked independently on both the bid and ask sides, then **averaged** to produce the final $\Lambda(\delta)$.
+5. **Bid/ask tracking**: Fill rates are tracked independently on both the bid and ask sides, then **averaged** to produce the final $\Lambda(\delta)$.
 
 6. **Monotonicity enforcement**: Raw fill rates are made monotonically decreasing (a physical requirement — closer to mid should always fill faster) by applying cumulative minima from left to right.
 
@@ -528,7 +528,7 @@ All figures are saved to three directories under figures:
 | param_sweeps | α sweep (5 values × overlays) + β sweep (5 values × overlays) | ~30 |
 | intensity | Intensity family comparison (logistic/exponential/QR overlays) + Λ(δ) comparison + QR CTMC validation (5 plots) | ~21 |
 
-**[CORRECTED]** The exact figure counts depend on the option book size and which extension plots are enabled. The full pipeline runs from main.py in approximately 60 seconds on a standard machine.
+The exact figure counts depend on the option book size and which extension plots are enabled. The full pipeline runs from main.py in approximately 60 seconds on a standard machine.
 
 ---
 
@@ -539,37 +539,6 @@ All figures are saved to three directories under figures:
 | NumPy | ≥1.24 | Array operations, linear algebra |
 | SciPy | ≥1.10 | Special functions (`expit`), optimisation (`curve_fit`), signal processing (`savgol_filter`), interpolation (`PchipInterpolator`) |
 | Matplotlib | ≥3.7 | All plotting |
-
----
-
-## Summary of Corrections from Fact-Check
-
-| Section | Original claim | Correction |
-|---|---|---|
-| §2.1 | $r = 0.02$, $\kappa = 2.0$, $\bar{\nu} = 0.04$, $\nu_0 = 0.04$ | Code uses Q-measure: $r = 0$, $\kappa_Q = 3.0$, $\bar{\nu}_Q = 0.0225$, $\nu_0 = 0.0225$. P-measure ($\kappa_P = 2.0$, $\bar{\nu}_P = 0.04$) used only for HJB drift |
-| §2.2 | 200,000 paths, 500 steps/yr, antithetic variates | `N_PATHS = 100_000`, `STEPS_PER_YEAR = 252`, CRN (not antithetic) |
-| §2.2 | Cholesky had S and ν swapped | Fixed: $Z^\nu = \epsilon_1$, $Z^S = \rho\epsilon_1 + \sqrt{1-\rho^2}\epsilon_2$ |
-| §2.3 | $z_i = C_i / \lambda_i$, vega bump $\pm 0.001$ | $z_i = 5 \times 10^5 / C_i$; FD bump $\varepsilon = \nu_0 \times 5 \times 10^{-3} = 0.0001125$ |
-| §3.2 | $\nu$ grid centred on $\bar{\nu} = 0.04$, $\bar{V}$ dynamic | Grid $[0.0144, 0.0324]$ near $\nu_0 = 0.0225$; $\bar{V} = 10^7$ fixed |
-| §3.3 | Penalty $\gamma\xi^2\nu/8 \cdot (V^\pi)^2$, no VRP drift | Penalty $\gamma\xi^2/8 \cdot (V^\pi)^2$ (no $\nu$); added VRP drift term |
-| §4.1 | FD epsilon = $10^{-4} \times z_i$ | Actually `eps = 1e-6` (fixed scalar) |
-| §7.5 | Simplified H(p) substitution formula | Clarified the clipping to δ ≥ 0 and boundary value handling |
-| §8.3 | Did not mention simulation duration | Added: fill-probability bridge runs for 14,400s (4 hrs), validation pipeline for 7,200s (2 hrs) |
-| §8.4 | "10 × 10 bins" | Actually `QR_N_BINS = 12` per dimension (12 × 12) |
-| §8.4 | "1% of average dwell time" threshold | Actually 5% of average per bin with floor of 1.0 second |
-| §8.6 | Fill grid "80 points in [0, 0.06]" | Actually `QR_N_DELTAS = 80` points in [0, 0.058] where 0.058 = (Q_MAX-1)/KAPPA |
-| §8.6 | Missing detail on cancel probability | Added: probability = min(remaining-1, Qa)/Qa |
-| §8.6 | Missing detail on queue reset | Added: virtual orders reset on price moves |
-| §9 | Fixed figure counts | Changed to "typical count" since exact numbers depend on configuration |
-| §7.8 | Vague "fat-tail fill persistence" explanation | Replaced with precise second-difference derivation: non-quadratic $v \times$ FOC slope $c/(c-1) \approx 4$ amplification |
-| §5.1 | Convergence option K=10, T=2.0 | Actually uses K=8, T=1.0 (option 1 in the code); only bid spread plotted (not ask+bid) |
-| §8.1 | Brief HLR 2015 citation | Added explicit section references to HLR 2015 (§2.1, §3.1, §3.2, §4, Figures 3–5) |
-| §2.3 | "Brent's root-finding method" for IV extraction | Code uses Newton–Raphson (`implied_vol` in `black_scholes.py` line 52: `sigma -= residual / vega`) |
-| §3.4 | Initial guess $\delta^{(0)} = p + V/\beta$ | Code uses $\delta^{(0)} = p + 2V/\beta$ (`delta = p + 2.0 * VoB` in `hjb_solver.py`) |
-| §7.5 | $H = \max(H_{\text{foc}}, H_0, 0)$ (zero floor) | Code has no explicit zero floor: `H = np.maximum(H_1, H_0)` in `param_sweeps.py` |
-| §8.6 | Cancel probability $= \text{remaining}/Q$ | Code uses $\min(\text{remaining}-1, Q)/Q$; the $-1$ excludes the MM's own position |
-
----
 
 ## References
 
