@@ -374,9 +374,6 @@ def step4_convergence(v_all, options):
     plt.close()
     print(f"\n→ Saved {os.path.relpath(save_path, ROOT)}")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5.  Market simulation (placeholder)
 # ─────────────────────────────────────────────────────────────────────────────
 # 5.  Summary comparison table
 # ─────────────────────────────────────────────────────────────────────────────
