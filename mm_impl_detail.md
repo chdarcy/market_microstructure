@@ -70,7 +70,7 @@ For each option, the pricer computes:
 
 1. **Price** $C(K, T)$: expected payoff $\mathbb{E}[\max(S_T - K, 0)]$ (no discounting since $r = 0$)
 2. **Vega** $\mathcal{V}^i = \partial C / \partial \sqrt{\nu_0}$: computed by bumping $\nu_0$ by $\pm \varepsilon$ where $\varepsilon = \nu_0 \times 5 \times 10^{-3} = 0.0001125$ (`FD_EPS = NU0 * 5e-3`) and applying the chain rule $\mathcal{V}^i = 2\sqrt{\nu_0} \cdot \frac{C(\nu_0+\varepsilon) - C(\nu_0-\varepsilon)}{2\varepsilon}$. Common random numbers (identical RNG seed) cancel most MC noise.
-3. **Implied volatility** $\sigma_{\text{imp}}$: extracted by inverting the Black–Scholes formula via Brent's root-finding method
+3. **Implied volatility** $\sigma_{\text{imp}}$: extracted by inverting the Black–Scholes formula via Newton–Raphson iteration (analytically computing $\partial C/\partial \sigma$ at each step)
 
 The option data is packaged into a list of dictionaries, each containing `{K, T, price, vega, iv, lam, z}`, where:
 - $\lambda_i = \lambda_{\text{base}} / (1 + 0.7 |K_i - S_0|)$ is the option-specific arrival rate, declining with distance from ATM (the factor 0.7 and base rate $\lambda_{\text{base}} = 252 \times 30 = 7{,}560$ events/year follow the paper's §4.1)
@@ -143,7 +143,7 @@ For the **logistic intensity** $\Lambda(\delta) = \lambda / (1 + e^{\alpha + \be
 
 $$\delta^{(n+1)} = \delta^{(n)} - u(\delta^{(n)})(\delta^{(n)} - p) + V/\beta$$
 
-This converges in 15 iterations (the default `n_iter=15`), initialised at $\delta^{(0)} = p + V/\beta$.
+This converges in 15 iterations (the default `n_iter=15`), initialised at $\delta^{(0)} = p + 2V/\beta$.
 
 The computation is **fully vectorised** over all $(ν, V^\pi)$ grid points simultaneously using NumPy broadcasting, enabling the full HJB solve to complete in approximately 1 second.
 
@@ -326,7 +326,7 @@ The second-order condition is satisfied when $c > 1$ (which holds for the fitted
 
 $$H(p) = \frac{a \cdot \text{scale}}{(1+b\delta^*)^c} \cdot (\delta^* - p)$$
 
-**[CORRECTED]** In the implementation, $\delta^*$ is clipped to $[10^{-10}, \infty)$ to avoid numerical issues at the boundary. If $\delta^*_{\text{foc}} < 0$ (which occurs when $p < -1/(cb)$), the boundary value $\delta = 0$ is used in the Hamiltonian, giving $H_0 = a \cdot \text{scale} \cdot (-p)$. The final Hamiltonian takes the maximum of the interior FOC value and the boundary value, both floored at zero: $H = \max(H_{\text{foc}}, H_0, 0)$.
+**[CORRECTED]** In the implementation, $\delta^*$ is clipped to $[10^{-10}, \infty)$ to avoid numerical issues at the boundary. If $\delta^*_{\text{foc}} < 0$ (which occurs when $p < -1/(cb)$), the boundary value $\delta = 0$ is used in the Hamiltonian, giving $H_0 = a \cdot \text{scale} \cdot (-p)$. The final Hamiltonian takes the maximum of the interior FOC value and the boundary value: $H = \max(H_{\text{foc}}, H_0)$.
 
 ### 7.6 Handling Negative Offsets (Quote Withdrawal)
 
@@ -490,7 +490,7 @@ The mapping works as follows:
 
 2. **[CORRECTED] Queue-position fill tracking**: During the CTMC simulation, for each $\delta$ on a grid of `QR_N_DELTAS = 80` points uniformly spaced in $[0, d_{\text{hi}}]$ where $d_{\text{hi}} = (Q_{\max} - 1) / \kappa = 0.058$, we track a **virtual MM order** sitting at position $k(\delta)$ in the queue. Each virtual order maintains a `remaining` priority counter initialised to $k(\delta)$. The counter decreases by 1 when:
    - A **market order** hits the MM's side (unconditionally)
-   - A **cancellation** occurs on the MM's side (with probability $\text{remaining} / Q$, approximating the chance it hits a lot ahead of the MM)
+   - A **cancellation** occurs on the MM's side (with probability $\min(\text{remaining} - 1, \, Q) / Q$, approximating the chance it hits a lot ahead of the MM — the $-1$ excludes the MM's own position from the cancellation pool)
 
 3. **Fill event**: When `remaining` reaches 0, the MM is filled and the fill counter increments. The order immediately re-enters at position $k(\delta)$.
 
@@ -564,6 +564,10 @@ All figures are saved to three directories under figures:
 | §7.8 | Vague "fat-tail fill persistence" explanation | Replaced with precise second-difference derivation: non-quadratic $v \times$ FOC slope $c/(c-1) \approx 4$ amplification |
 | §5.1 | Convergence option K=10, T=2.0 | Actually uses K=8, T=1.0 (option 1 in the code); only bid spread plotted (not ask+bid) |
 | §8.1 | Brief HLR 2015 citation | Added explicit section references to HLR 2015 (§2.1, §3.1, §3.2, §4, Figures 3–5) |
+| §2.3 | "Brent's root-finding method" for IV extraction | Code uses Newton–Raphson (`implied_vol` in `black_scholes.py` line 52: `sigma -= residual / vega`) |
+| §3.4 | Initial guess $\delta^{(0)} = p + V/\beta$ | Code uses $\delta^{(0)} = p + 2V/\beta$ (`delta = p + 2.0 * VoB` in `hjb_solver.py`) |
+| §7.5 | $H = \max(H_{\text{foc}}, H_0, 0)$ (zero floor) | Code has no explicit zero floor: `H = np.maximum(H_1, H_0)` in `param_sweeps.py` |
+| §8.6 | Cancel probability $= \text{remaining}/Q$ | Code uses $\min(\text{remaining}-1, Q)/Q$; the $-1$ excludes the MM's own position |
 
 ---
 
