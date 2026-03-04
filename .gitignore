@@ -7,3 +7,4 @@ results/*
 *.odt
 for_chris/
 .pytest_cache
+*.tex
