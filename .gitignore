@@ -5,3 +5,5 @@ test/
 1907.12433v7.pdf
 results/*
 *.odt
+for_chris/
+.pytest_cache

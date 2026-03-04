@@ -61,7 +61,7 @@ def step1_heston_pricer():
     banner("Step 1 · Heston Monte-Carlo pricer")
 
     from heston_pricer import (
-        get_option_data, main as heston_main,
+        get_option_data,
         STRIKES, MATURITIES, S0, NU0, N_PATHS, SEED,
     )
     from black_scholes import implied_vol
@@ -125,7 +125,7 @@ def step2_hjb_solver(options):
     banner("Step 2 · HJB PDE solver")
 
     from hjb_solver import (
-        solve_hjb, nu_grid, vpi_grid, plot_figure2,
+        solve_hjb, nu_grid, vpi_grid,
         N_T, N_NU, N_VPI, T, dt, V_BAR, GAMMA, XI,
     )
 
@@ -183,7 +183,7 @@ def step3_optimal_spreads(v0, options):
 
     from hjb_solver import nu_grid, vpi_grid, N_VPI
     from optimal_spreads import (
-        compute_all_spreads, plot_figures_4_8, plot_figures_9_13,
+        compute_all_spreads,
         NU0, DELTA_INF, S0,
     )
 

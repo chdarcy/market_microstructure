@@ -1,24 +1,7 @@
 """
-param_sweeps.py
-===============
-Parameter sensitivity analysis for the vega market-making model.
-
-Sweeps:
-  A) α (alpha)  — intercept of the logistic intensity
-  B) β (beta)   — steepness of the logistic intensity
-  C) Intensity function family — logistic (baseline), exponential
-  D) Queue-Reactive L1 LOB model (Huang-Lehalle-Rosenbaum 2015)
-     — CTMC simulator with state-dependent intensities at the best
-       bid/ask.  Self-contained extension: synthetic data generation,
-       non-parametric estimation, simulation from estimated model,
-       and comprehensive validation plots.
-
-For each configuration the HJB PDE is re-solved and optimal spreads are
-recomputed.  Overlay plots compare mid-to-bid, ask-to-mid, total spread
-vs portfolio vega, and spread vs strike at fixed vega levels.
-
-All figures are saved to  figures/param_sweeps/  without overwriting the
-main paper figures.
+Parameter sensitivity analysis: α sweep, β sweep, intensity family
+comparison (logistic/exponential/queue-reactive), and a queue-reactive
+L1 LOB CTMC simulator (Huang-Lehalle-Rosenbaum 2015).
 """
 
 import os
@@ -34,7 +17,6 @@ from scipy.interpolate import PchipInterpolator
 from scipy.optimize import curve_fit
 from scipy.signal import savgol_filter
 
-# ── Local imports ─────────────────────────────────────────────────────────────
 import hjb_solver as hjb
 from hjb_solver import (
     nu_grid, vpi_grid, N_NU, N_VPI, V_BAR, N_T,
@@ -50,7 +32,7 @@ INTENSITY_DIR = os.path.join(ROOT, "figures", "intensity")
 os.makedirs(SWEEP_DIR, exist_ok=True)
 os.makedirs(INTENSITY_DIR, exist_ok=True)
 
-# ── Baseline parameter values ─────────────────────────────────────────────────
+# Baseline parameters
 ALPHA_BASE = hjb.ALPHA
 BETA_BASE  = hjb.BETA
 
@@ -106,100 +88,40 @@ def _lambda_inv_exponential(y, lam, V_i, alpha, beta):
     return (np.log(ratio) - alpha) / bV
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Queue-Reactive empirical fill-probability bridge
-# ═══════════════════════════════════════════════════════════════════════════════
+# Queue-reactive empirical fill-probability bridge
 #
-# Run the CTMC and measure empirical Λ(δ): for a market-maker posting a
-# limit order at offset δ from mid on the ask (bid) side, what is the fill
-# rate per unit time?
-#
-# Mapping δ → queue position:
-#   In the L1 single-tick model the ask queue has Q_a lots. A MM posting
-#   at offset δ from mid joins the queue at position
-#       k(δ) = max(1, round(1 + QR_KAPPA * δ))
-#   where QR_KAPPA converts price-offset to lots-from-front.
-#   k = 1  → front of queue (δ ≈ 0)
-#   k > Q_a → behind the entire queue (will not fill unless queue grows
-#             and then depletes through the MM's position).
-#
-# Fill event: a M_a (market buy) arrives and the post-event ask queue
-#   Q_a − 1 < k  (i.e. the queue has just been eaten through the MM's
-#   position).  Equivalently the MM fills whenever M_a fires AND Q_a ≤ k
-#   *before* the event (since M_a removes 1 lot, the MM at position k
-#   fills if the remaining queue after removal is < k, i.e. Q_a ≤ k).
-#
-# We symmetrise over bid/ask.  The empirical Λ is measured on a dense
-# grid of δ values and stored as a PCHIP interpolant for smooth
-# evaluation inside the HJB.
-# ═══════════════════════════════════════════════════════════════════════════════
+# δ → queue position k(δ) = max(1, round(1 + QR_KAPPA·δ)).
+# Fill when market orders eat through the MM's position.
+# Symmetrised over bid/ask; stored as a power-law fit for the HJB.
 
-# Scale factor: δ (price units) → queue position (lots from front)
-# At δ=0 the MM is at the front of queue (position 1).
-# At δ=0.01 (~1 tick) the MM is ~1 + QR_KAPPA * 0.01 lots deep.
-# κ=500 ⇒ 1 tick → position 6;  3 cents → position 16.
 QR_KAPPA = 500.0    # lots per price-unit of offset
 
-# ── Module-level cache for the empirical Λ(δ) curve ──────────────────────────
-_QR_LAMBDA_INTERP  = None   # callable: δ → Λ(δ) (power-law fit)
-_QR_LAMBDA_MAX     = None   # maximum Λ (at δ=0), i.e. fit parameter a
-_QR_DELTA_GRID     = None   # raw δ grid (price units)
-_QR_FILL_RATES     = None   # raw Λ(δ) values (fills/sec)
-_QR_FIT_PARAMS     = None   # (a, b, c) power-law fit parameters
+_QR_LAMBDA_INTERP  = None
+_QR_LAMBDA_MAX     = None
+_QR_DELTA_GRID     = None
+_QR_FILL_RATES     = None
+_QR_FIT_PARAMS     = None
 
 
 def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
                                         delta_max_price=None, seed=42):
     """
-    Run the CTMC and measure the empirical fill rate Λ(δ) for a MM limit
-    order posted at offset δ from mid on the ask (bid) side.
-
-    For each δ we track a virtual MM order sitting at queue position
-    k(δ) = max(1, round(1 + QR_KAPPA·δ)) lots from the front of the queue.
-    The MM's remaining priority decreases by 1 each time a market order
-    (or a cancel ahead of the MM) hits that side.  When the remaining
-    priority reaches 0, the MM is filled.  After a fill or a queue reset
-    (price move), the MM re-enters at position k.
-
-    Symmetrised over bid + ask.
-
-    Parameters
-    ----------
-    T_seconds : float
-        Total CTMC simulation time (default 4 hours for good statistics).
-    n_delta : int
-        Number of δ grid points to evaluate.
-    delta_max_price : float or None
-        Maximum δ in price units.  Defaults to (QR_Q_MAX - 1) / QR_KAPPA so
-        that every grid point maps to a distinct queue position and the tail
-        of the fill-rate curve is not artificially flattened by k_grid
-        saturation at QR_Q_MAX.
-    seed : int
-        RNG seed.
-
-    Returns
-    -------
-    delta_grid : ndarray (n_delta,) — δ values in price units
-    fill_rates : ndarray (n_delta,) — empirical Λ(δ) in fills/sec
+    Run the CTMC and measure empirical fill rate Λ(δ) for a MM limit order
+    at offset δ from mid.  Symmetrised over bid + ask.
+    Returns (delta_grid, fill_rates).
     """
     global _QR_LAMBDA_INTERP, _QR_LAMBDA_MAX, _QR_DELTA_GRID, _QR_FILL_RATES
     global _QR_FIT_PARAMS
 
-    # Cap delta_max so k_grid never saturates at QR_Q_MAX.
-    # With QR_KAPPA=500 and QR_Q_MAX=30, the natural cap is 29/500 = 0.058.
-    # Without this, the last few grid points all map to k=30, producing a
-    # staircase plateau that the monotone-enforcement loop propagates inward.
+    # Cap delta_max so k_grid never saturates at QR_Q_MAX
     if delta_max_price is None:
         delta_max_price = (QR_Q_MAX - 1) / QR_KAPPA   # = 0.058 with defaults
 
     rng = np.random.default_rng(seed)
 
     delta_grid = np.linspace(0.0, delta_max_price, n_delta)
-    # Queue position for each δ: k=1 means front of queue (δ≈0)
     k_grid = np.maximum(1, np.round(1 + QR_KAPPA * delta_grid)).astype(int)
 
-    # For each δ, track remaining lots that must be consumed before the MM fills.
-    # remaining[i] starts at k_grid[i] and counts down toward 0.
     remaining_ask = k_grid.copy().astype(float)
     remaining_bid = k_grid.copy().astype(float)
 
@@ -222,19 +144,7 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
         probs /= probs.sum()
         event = EVENT_NAMES[rng.choice(len(EVENT_NAMES), p=probs)]
 
-        # ── Track MM fills via queue-position tracking ───────────────
-        #
-        # The MM's virtual order starts at position k(δ) from the front.
-        # `remaining` counts how many lots (including the MM's own position)
-        # must be consumed before the MM fills.  It decreases by 1 on each
-        # market order that hits this side (unconditionally — every lot in
-        # the queue is ahead of or at the MM's tracked position) and with
-        # probability p_ahead on each cancel.
-        #
-        # Market orders: unconditional decrement.  Even if Qa < k_grid
-        # (queue shorter than the MM's entry position), every physical lot
-        # in the queue IS ahead of the MM, so consuming one lot reduces
-        # the number of lots the MM needs to wait through.
+        # Track MM fills via queue-position tracking
         if event == "M_a":
             remaining_ask -= 1
             filled = (remaining_ask <= 0)
@@ -247,11 +157,7 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
             fill_counts += filled
             remaining_bid[filled] = k_grid[filled]
 
-        # Cancels ahead of MM also reduce remaining priority.
-        # The cancel removes one lot chosen uniformly from the Qa physical
-        # lots. The number of lots ahead of the MM is min(remaining-1, Qa)
-        # (capped at Qa because there can't be more lots ahead than exist).
-        # So p_ahead = min(remaining-1, Qa) / max(Qa, 1).
+        # Cancels ahead of MM reduce remaining priority
         if event == "C_a" and Qa > 1:
             lots_ahead = np.minimum(remaining_ask - 1, Qa)
             p_ahead = np.clip(lots_ahead / Qa, 0.0, 1.0)
@@ -270,12 +176,12 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
             fill_counts += filled
             remaining_bid[filled] = k_grid[filled]
 
-        # ── Apply event to book ──────────────────────────────────────
+        # Apply event to book
         dQb, dQa = EVENT_EFFECTS[event]
         Qb += dQb * QR_LOT_SIZE
         Qa += dQa * QR_LOT_SIZE
 
-        # Queue depletion → price move + reset (MM re-enters at position k)
+        # Queue depletion → price move + reset
         if Qb <= 0:
             mid -= 0.01
             Qb = max(1, int(rng.geometric(1.0 / QR_Q_RESET_MU)))
@@ -306,17 +212,7 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
     # Ensure strictly positive floor for numerical safety
     fill_rates = np.maximum(fill_rates, 1e-6)
 
-    # ── Fit a smooth parametric curve to the fill rates ──────────────
-    # The raw data has staircase artefacts (consecutive equal values)
-    # because multiple δ values map to the same integer queue position.
-    # A PCHIP interpolant on the raw data preserves these flat segments,
-    # which creates multiple local optima in the Hamiltonian's profit
-    # landscape Λ(δ)·(δ−p) and produces staircase-like optimal spreads.
-    #
-    # Instead we fit Λ(δ) = a / (1 + b·δ)^c  — a power-law decay that
-    # is guaranteed monotonically decreasing and produces a unimodal
-    # profit function.  This matches the heavy-tail behaviour expected
-    # from queue-reactive LOB models.
+    # Fit power-law: Λ(δ) = a / (1 + b·δ)^c
     _QR_DELTA_GRID = delta_grid.copy()
     _QR_FILL_RATES = fill_rates.copy()
 
@@ -333,16 +229,13 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
         # Fallback: use a simpler exponential fit
         _QR_FIT_PARAMS = np.array([fill_rates[0], 200.0, 1.0])
 
-    _QR_LAMBDA_MAX = _QR_FIT_PARAMS[0]   # Λ(0) = a
+    _QR_LAMBDA_MAX = _QR_FIT_PARAMS[0]
 
-    # Store the fit for evaluation (no PCHIP interpolant needed)
-    # _QR_LAMBDA_INTERP is kept as a callable for backward compatibility
-    # For δ < 0 (MM crosses spread), cap at Λ(0) = a.
+    # Build callable for evaluation
     a_fit, b_fit, c_fit = _QR_FIT_PARAMS
 
     def _power_law_eval(delta):
         delta = np.asarray(delta, dtype=float)
-        # For δ < 0, Λ = Λ(0) = a (flat extension)
         delta_clamped = np.maximum(delta, 0.0)
         val = a_fit / (1.0 + b_fit * delta_clamped)**c_fit
         return np.maximum(val, 1e-8)
@@ -353,34 +246,19 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
 
 
 def _qr_lambda(delta_price):
-    """
-    Evaluate the smooth queue-reactive fill rate at offset δ (price units).
-
-    Uses the fitted power-law curve Λ(δ) = a / (1 + b·δ)^c, which is
-    guaranteed monotonically decreasing and infinitely differentiable.
-    Returns array matching input shape.
-    """
+    """Evaluate smooth queue-reactive fill rate at offset δ (price units)."""
     if _QR_LAMBDA_INTERP is None:
         raise RuntimeError("Call estimate_fill_probability_from_ctmc() first.")
     delta_price = np.asarray(delta_price)
     val = _QR_LAMBDA_INTERP(delta_price)
     return np.maximum(val, 1e-8)
 
-
-# ---------- Queue-reactive: Hamiltonian (analytical, power-law) ---------------
-
+# QR Hamiltonian (analytical, power-law)
 
 def _hamiltonian_qr(p, lam, V_i, alpha, beta, n_iter=15):
     """
-    Fully vectorised Hamiltonian for the queue-reactive model.
-
-    Power-law fit  Λ(δ) = a / (1 + b·δ)^c.
-    The FOC gives  δ* = (1 + c·b·p) / (b·(c − 1))  for c ≠ 1.
-
-    During the HJB PDE solve, δ* is constrained to δ ≥ 0 (the fitted
-    domain) to ensure numerical stability of the explicit scheme.
-    The spread computation uses a separate, relaxed inversion that
-    allows δ < 0 when the MM should improve the price.
+    Vectorised Hamiltonian for the QR model.
+    Power-law Λ(δ) = a / (1 + b·δ)^c, closed-form FOC.
     """
     p = np.asarray(p, dtype=float)
 
@@ -397,37 +275,27 @@ def _hamiltonian_qr(p, lam, V_i, alpha, beta, n_iter=15):
     else:
         delta_foc = (1.0 + c * b * p) / (b * (c - 1.0))
 
-    # Interior FOC (δ ≥ 0 for PDE stability), no upper clamp
+    # Interior FOC (δ ≥ 0 for PDE stability)
     delta_1 = np.maximum(delta_foc, 1e-10)
     lam_1 = a / (1.0 + b * delta_1)**c * scale
     H_1 = lam_1 * (delta_1 - p)
 
-    # Boundary at δ = 0 (Λ = a)
+    # Boundary at δ = 0
     H_0 = a * scale * (0.0 - p)
 
-    # sup is the better of interior and boundary
+    # sup of interior and boundary
     H = np.maximum(H_1, H_0)
 
     return H
 
 
 def _lambda_inv_qr(y, lam, V_i, alpha, beta):
-    """
-    Λ⁻¹(y): find δ such that Λ_QR(δ) = y.
-
-    With the power-law fit  Λ(δ) = a / (1 + b·δ)^c  the inverse is:
-
-        δ = ((a / y)^{1/c} − 1) / b
-
-    Fully vectorised, no root-finding needed.  Allows negative δ
-    (just like logistic / exponential) so that the MM can withdraw
-    or improve quotes when the variance-risk premium pushes it.
-    """
+    """Λ⁻¹(y) for power-law: δ = ((a/y)^{1/c} − 1) / b.  Fully vectorised."""
     y = np.asarray(y, dtype=float)
     scalar_input = (y.ndim == 0)
     y_flat = y.ravel()
 
-    # Rescale y to the empirical curve's units
+    # Rescale y to empirical curve units
     if _QR_LAMBDA_MAX is not None and _QR_LAMBDA_MAX > 1e-10:
         scale = lam / _QR_LAMBDA_MAX
     else:
@@ -436,16 +304,15 @@ def _lambda_inv_qr(y, lam, V_i, alpha, beta):
 
     a, b, c = _QR_FIT_PARAMS
 
-    # Closed-form inverse of the power-law (no lower clamp on ratio)
-    ratio = a / np.clip(y_raw, 1e-30, None)       # can be < 1 when y > a
-    result = (ratio ** (1.0 / c) - 1.0) / b       # negative when ratio < 1
+    # Closed-form inverse (no lower clamp — negative δ allowed)
+    ratio = a / np.clip(y_raw, 1e-30, None)
+    result = (ratio ** (1.0 / c) - 1.0) / b
 
     if scalar_input:
         return result.item()
     return result.reshape(y.shape)
 
-
-# ── Registry of intensity families ────────────────────────────────────────────
+# Intensity family registry
 INTENSITY_FAMILIES = {
     "logistic":      (_hamiltonian_logistic,    _lambda_inv_logistic),
     "exponential":   (_hamiltonian_exponential, _lambda_inv_exponential),
@@ -456,14 +323,8 @@ INTENSITY_FAMILIES = {
 # ═══════════════════════════════════════════════════════════════════════════════
 # Core: solve + compute spreads with custom α, β, intensity
 # ═══════════════════════════════════════════════════════════════════════════════
-
 def _solve_with_params(options, alpha, beta, intensity_name="logistic"):
-    """
-    Solve HJB and compute spreads using specified (α, β, intensity).
-
-    Temporarily patches hjb_solver globals; restores them on exit.
-    Returns (v0, spreads_dict).
-    """
+    """Solve HJB + compute spreads with custom (α, β, intensity).  Patches globals temporarily."""
     ham_fn, lam_inv_fn = INTENSITY_FAMILIES[intensity_name]
 
     # Save originals
@@ -479,16 +340,15 @@ def _solve_with_params(options, alpha, beta, intensity_name="logistic"):
     )
 
     try:
-        # Also patch optimal_spreads to use the same α, β, intensity
         import optimal_spreads as os_mod
         orig_os_alpha = os_mod.ALPHA
         orig_os_beta  = os_mod.BETA
 
-        # Monkey-patch ALPHA/BETA used in lambda_inverse and hamiltonian_prime
+        # Patch ALPHA/BETA
         os_mod.ALPHA = alpha
         os_mod.BETA  = beta
 
-        # Patch lambda_inverse to use our intensity family
+        # Patch lambda_inverse
         orig_lam_inv = os_mod.lambda_inverse
         os_mod.lambda_inverse = lambda y, lam, V_i: lam_inv_fn(
             y, lam, V_i, alpha, beta
@@ -1640,10 +1500,3 @@ def run_all_sweeps(options=None):
         print(f"    → {f}")
 
     return all_fnames
-
-
-if __name__ == "__main__":
-    print("=" * 72)
-    print("  Parameter sweeps — α, β, intensity function, queue-reactive")
-    print("=" * 72)
-    run_all_sweeps()
