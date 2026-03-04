@@ -149,7 +149,7 @@ _QR_FIT_PARAMS     = None   # (a, b, c) power-law fit parameters
 
 
 def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
-                                        delta_max_price=0.06, seed=42):
+                                        delta_max_price=None, seed=42):
     """
     Run the CTMC and measure the empirical fill rate Λ(δ) for a MM limit
     order posted at offset δ from mid on the ask (bid) side.
@@ -169,8 +169,11 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
         Total CTMC simulation time (default 4 hours for good statistics).
     n_delta : int
         Number of δ grid points to evaluate.
-    delta_max_price : float
-        Maximum δ in price units (default 0.06 = 6 ticks).
+    delta_max_price : float or None
+        Maximum δ in price units.  Defaults to (QR_Q_MAX - 1) / QR_KAPPA so
+        that every grid point maps to a distinct queue position and the tail
+        of the fill-rate curve is not artificially flattened by k_grid
+        saturation at QR_Q_MAX.
     seed : int
         RNG seed.
 
@@ -182,18 +185,25 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
     global _QR_LAMBDA_INTERP, _QR_LAMBDA_MAX, _QR_DELTA_GRID, _QR_FILL_RATES
     global _QR_FIT_PARAMS
 
+    # Cap delta_max so k_grid never saturates at QR_Q_MAX.
+    # With QR_KAPPA=500 and QR_Q_MAX=30, the natural cap is 29/500 = 0.058.
+    # Without this, the last few grid points all map to k=30, producing a
+    # staircase plateau that the monotone-enforcement loop propagates inward.
+    if delta_max_price is None:
+        delta_max_price = (QR_Q_MAX - 1) / QR_KAPPA   # = 0.058 with defaults
+
     rng = np.random.default_rng(seed)
 
     delta_grid = np.linspace(0.0, delta_max_price, n_delta)
-    # Queue position for each δ
+    # Queue position for each δ: k=1 means front of queue (δ≈0)
     k_grid = np.maximum(1, np.round(1 + QR_KAPPA * delta_grid)).astype(int)
 
-    # For each δ, track remaining lots ahead of MM on each side
+    # For each δ, track remaining lots that must be consumed before the MM fills.
+    # remaining[i] starts at k_grid[i] and counts down toward 0.
     remaining_ask = k_grid.copy().astype(float)
     remaining_bid = k_grid.copy().astype(float)
 
     fill_counts = np.zeros(n_delta)
-    total_time = 0.0
 
     Qb, Qa = 15, 15
     mid = 100.0
@@ -212,40 +222,51 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
         probs /= probs.sum()
         event = EVENT_NAMES[rng.choice(len(EVENT_NAMES), p=probs)]
 
-        total_time += dt
-
         # ── Track MM fills via queue-position tracking ───────────────
+        #
+        # The MM's virtual order starts at position k(δ) from the front.
+        # `remaining` counts how many lots (including the MM's own position)
+        # must be consumed before the MM fills.  It decreases by 1 on each
+        # market order that hits this side (unconditionally — every lot in
+        # the queue is ahead of or at the MM's tracked position) and with
+        # probability p_ahead on each cancel.
+        #
+        # Market orders: unconditional decrement.  Even if Qa < k_grid
+        # (queue shorter than the MM's entry position), every physical lot
+        # in the queue IS ahead of the MM, so consuming one lot reduces
+        # the number of lots the MM needs to wait through.
         if event == "M_a":
-            # Market buy hits ask — consumes one lot from front of queue
             remaining_ask -= 1
             filled = (remaining_ask <= 0)
             fill_counts += filled
             remaining_ask[filled] = k_grid[filled]
 
         if event == "M_b":
-            # Market sell hits bid
             remaining_bid -= 1
             filled = (remaining_bid <= 0)
             fill_counts += filled
             remaining_bid[filled] = k_grid[filled]
 
-        # Cancels ahead of MM also reduce remaining priority
+        # Cancels ahead of MM also reduce remaining priority.
+        # The cancel removes one lot chosen uniformly from the Qa physical
+        # lots. The number of lots ahead of the MM is min(remaining-1, Qa)
+        # (capped at Qa because there can't be more lots ahead than exist).
+        # So p_ahead = min(remaining-1, Qa) / max(Qa, 1).
         if event == "C_a" and Qa > 1:
-            # Prob that the cancelled lot is ahead of MM ≈ (remaining-1)/(Qa-1)
-            # remaining_ask includes MM's own lot, so lots ahead = remaining-1
-            # pool of cancellable lots excludes the MM = Qa-1
-            p_ahead = np.clip((remaining_ask - 1) / max(Qa - 1, 1), 0, 1)
+            lots_ahead = np.minimum(remaining_ask - 1, Qa)
+            p_ahead = np.clip(lots_ahead / Qa, 0.0, 1.0)
             cancel_ahead = (rng.random(n_delta) < p_ahead)
             remaining_ask[cancel_ahead] -= 1
-            filled = (remaining_ask <= 0)
+            filled = cancel_ahead & (remaining_ask <= 0)
             fill_counts += filled
             remaining_ask[filled] = k_grid[filled]
 
         if event == "C_b" and Qb > 1:
-            p_ahead = np.clip((remaining_bid - 1) / max(Qb - 1, 1), 0, 1)
+            lots_ahead = np.minimum(remaining_bid - 1, Qb)
+            p_ahead = np.clip(lots_ahead / Qb, 0.0, 1.0)
             cancel_ahead = (rng.random(n_delta) < p_ahead)
             remaining_bid[cancel_ahead] -= 1
-            filled = (remaining_bid <= 0)
+            filled = cancel_ahead & (remaining_bid <= 0)
             fill_counts += filled
             remaining_bid[filled] = k_grid[filled]
 
@@ -271,8 +292,12 @@ def estimate_fill_probability_from_ctmc(T_seconds=14400.0, n_delta=80,
         Qb = min(Qb, QR_Q_MAX)
         Qa = min(Qa, QR_Q_MAX)
 
+    # Use the actual elapsed simulation time (capped at T_seconds since the
+    # loop can overshoot slightly on the last exponential draw).
+    elapsed = min(t, T_seconds)
+
     # Per-side fill rate (averaged over bid + ask)
-    fill_rates = fill_counts / (2.0 * total_time)
+    fill_rates = fill_counts / (2.0 * elapsed)
 
     # Ensure monotonically decreasing (physical requirement)
     for i in range(1, len(fill_rates)):
@@ -782,8 +807,8 @@ def sweep_intensity(options, save_dir=None):
               end="", flush=True)
         t0 = time.time()
         dg, fr = estimate_fill_probability_from_ctmc(
-            T_seconds=14400.0, n_delta=80, delta_max_price=0.06, seed=42,
-        )
+            T_seconds=14400.0, n_delta=80, seed=42,
+        )  # delta_max_price uses corrected default: (QR_Q_MAX-1)/QR_KAPPA
         print(f"  {time.time()-t0:.1f}s  "
               f"(Λ(0)={fr[0]:.3f}/s, Λ(max)={fr[-1]:.6f}/s)")
 
@@ -991,7 +1016,9 @@ GT_FLOOR = 0.1   # minimum intensity (events/sec)
 QR_LOT_SIZE   = 1        # v: each event changes queue by this many lots
 QR_Q_MAX      = 30       # maximum queue size (capped)
 QR_Q_RESET_MU = 8.0      # mean of queue reset distribution (geometric)
-QR_N_BINS     = 12       # number of bins per queue axis for estimation
+QR_N_BINS     = 12       # bins per queue axis for estimate_intensities()
+                         # (used by D.2 validation pipeline — separate from the
+                         #  fill-probability bridge in estimate_fill_probability_from_ctmc)
 
 
 def _gt_intensity(event, Qb, Qa):
